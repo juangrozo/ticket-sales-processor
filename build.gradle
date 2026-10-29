@@ -1,0 +1,27 @@
+plugins {
+	id 'co.com.bancolombia.cleanArchitecture'
+	id 'org.springframework.boot' apply false
+    id 'org.sonarqube'
+    id 'info.solidsoft.pitest'
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+		implementation platform('software.amazon.awssdk:bom:2.57.4')
+    }
+}
+
+// Force dependency versions to address reported vulnerabilities.
+dependenciesOverride {
+   ensure 'com.fasterxml.jackson.core:jackson-core:2.22.4'
+   ensure 'tools.jackson.core:jackson-core:3.2.4'
+}
+
+subprojects {
+    // Remove once it has been updated in Spring Boot
+    ext['jackson-2-bom.version'] = "2.22.4"
+    ext['jackson-bom.version'] = "3.2.4"
+}
