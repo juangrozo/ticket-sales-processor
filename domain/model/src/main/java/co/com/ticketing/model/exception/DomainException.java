@@ -9,7 +9,10 @@ public abstract sealed class DomainException extends RuntimeException
                 ResourceNotFoundException,
                 InvalidStateTransitionException,
                 InsufficientInventoryException,
-                ReservationExpiredException {
+                ReservationExpiredException,
+                ConcurrentUpdateException,
+                IdempotencyConflictException,
+                DuplicateIdempotencyKeyException {
 
     protected DomainException(String message) {
         super(message);

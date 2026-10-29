@@ -15,6 +15,11 @@ class DomainExceptionTest {
         assertThat(new InsufficientInventoryException("e-1", 5, 2))
                 .hasMessage("Event e-1 has 2 tickets in the requested state, 5 requested");
         assertThat(new DomainValidationException("bad")).hasMessage("bad");
+        assertThat(new InsufficientInventoryException("e-1", 3))
+                .hasMessage("Event e-1 does not have 3 tickets in the requested state");
+        assertThat(new ConcurrentUpdateException("Order", "o-1")).hasMessage("Order o-1 was modified concurrently");
+        assertThat(new IdempotencyConflictException()).hasMessageContaining("different request");
+        assertThat(new DuplicateIdempotencyKeyException("c-1#k")).hasMessageContaining("c-1#k");
     }
 
     @Test
@@ -24,7 +29,8 @@ class DomainExceptionTest {
         int status = switch (error) {
             case DomainValidationException _ -> 400;
             case ResourceNotFoundException _ -> 404;
-            case InvalidStateTransitionException _, InsufficientInventoryException _ -> 409;
+            case InvalidStateTransitionException _, InsufficientInventoryException _, ConcurrentUpdateException _,
+                 IdempotencyConflictException _, DuplicateIdempotencyKeyException _ -> 409;
             case ReservationExpiredException _ -> 410;
         };
 
