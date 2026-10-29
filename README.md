@@ -327,7 +327,7 @@ En local las credenciales son valores ficticios, porque los emuladores no las va
 | `GET` | `/events/{id}/report` | Reporte operativo, contable y de inventario; las cortesías no cuentan como venta |
 | `POST` | `/events/{id}/complimentary` | Asignar cortesías; requiere `X-Admin-Key`; responde `201` |
 | `POST` | `/orders` | Crear una orden; requiere `X-Customer-Id` e `Idempotency-Key`; responde `202` |
-| `GET` | `/orders/{id}` | Estado de la orden (`orderStatus`) y de sus entradas (`ticketStatus`) |
+| `GET` | `/orders/{id}` | Estado de la orden (`orderStatus`) y de sus entradas (`ticketStatus`); requiere `X-Customer-Id` del dueño |
 | `POST` | `/orders/{id}/confirm` | Confirmar la compra; requiere `X-Customer-Id` del dueño; responde `202` y el pago corre en el worker |
 
 `X-Customer-Id` sustituye al usuario autenticado; con JWT saldría del token. La pasarela de pago es simulada: aprueba todo salvo a los clientes cuyo id empieza por `declined-`, lo que permite probar el camino del rechazo.
@@ -380,7 +380,12 @@ Se usan varias tablas (`ticketing-events`, `-orders`, `-tickets`, `-audit` e `-i
 - `DomainException` también es `sealed`, para mapear cada error de negocio a su respuesta HTTP con un `switch` exhaustivo.
 
 ### Sin virtual threads
-WebFlux ya es no bloqueante: unos pocos hilos atienden miles de peticiones concurrentes. Los virtual threads resuelven el problema del código bloqueante, que aquí no existe. BlockHound, activo en los tests, falla si algún flujo bloquea. Solo hay una excepción declarada: `UUID.randomUUID()`, que lee `/dev/urandom` a través de un `SecureRandom` con buffer y en la práctica no bloquea. Los identificadores se mantienen criptográficamente aleatorios porque aparecen en las URLs.
+WebFlux ya es no bloqueante: unos pocos hilos atienden miles de peticiones concurrentes. Los virtual threads resuelven el problema del código bloqueante, que aquí no existe. BlockHound, activo en los tests, falla si algún flujo bloquea, y encontró casos reales. Hay tres excepciones declaradas y justificadas, ninguna espera I/O:
+- `UUID.randomUUID()`, que lee `/dev/urandom` a través de un `SecureRandom` con buffer y en la práctica no bloquea. Los identificadores se mantienen criptográficamente aleatorios porque aparecen en las URLs.
+- La caché de deserializadores de Jackson, que se construye una vez por tipo bajo un lock. Solo aparece con una ráfaga de primeras peticiones.
+- El pool de `MessageDigest` con el que el AWS SDK firma cada petición, también protegido por un lock. Solo aparece con muchas llamadas simultáneas.
+
+Las dos últimas solo salieron en el test de integración con 100 compras concurrentes. Ningún test unitario las habría encontrado.
 
 ### Emuladores locales en lugar de LocalStack
 Desde la versión 2026.03.0, la imagen de LocalStack exige un token de autenticación. Para que `docker compose up` funcione en cualquier máquina sin cuentas ni secretos, se usan DynamoDB Local y ElasticMQ, compatible con la API de SQS (colas, DLQ, visibility timeout y long polling).
@@ -389,7 +394,7 @@ Desde la versión 2026.03.0, la imagen de LocalStack exige un token de autentica
 - Sin credenciales en el repositorio; la configuración entra por variables de entorno.
 - El contenedor se ejecuta con un usuario sin privilegios.
 - Los endpoints de administración exigen `X-Admin-Key`, leída solo de la variable de entorno `ADMIN_API_KEY` y comparada en tiempo constante. Sin clave configurada, quedan deshabilitados. El valor de docker-compose es solo para desarrollo local. En producción se sustituiría por un rol emitido por un servidor de autorización.
-- Un cliente no puede confirmar órdenes ajenas: la confirmación de una orden de otro cliente responde `404`, igual que si no existiera. La consulta `GET /orders/{id}` todavía no valida al dueño; los ids son UUID aleatorios e impredecibles, pero la validación llegaría con JWT (ver limitaciones).
+- Un cliente no puede consultar ni confirmar órdenes ajenas (protección frente a IDOR, el primer riesgo del OWASP API Security Top 10). Una orden de otro cliente responde `404`, igual que si no existiera, así que un id filtrado en un log o un enlace no revela nada. Los ids son además UUID aleatorios. Hoy el cliente se identifica con `X-Customer-Id`; con JWT saldría del token y la regla de autorización no cambiaría.
 - Los streams de disponibilidad se cierran a los 10 minutos para que conexiones inactivas no acaparen recursos.
 - Los 5xx nunca exponen detalles internos.
 - Idempotencia frente a reintentos maliciosos o del cliente: la misma `Idempotency-Key` con un cuerpo distinto responde `422`. Las claves se guardan por cliente, así que nadie puede colisionar con las de otro ni sondearlas.
