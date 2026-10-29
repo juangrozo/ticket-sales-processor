@@ -19,7 +19,7 @@ Backend reactivo y orientado a eventos para la venta de entradas a eventos (conc
 - Clean Architecture generada con [scaffold-clean-architecture](https://github.com/bancolombia/scaffold-clean-architecture) de Bancolombia 5.0.5
 - Docker y Docker Compose
 - Tests: JUnit 5, Mockito, reactor-test (`StepVerifier`), BlockHound, ArchUnit, JaCoCo y Pitest
-- Terraform para la infraestructura en AWS *(pendiente)*
+- Terraform para la infraestructura en AWS (validado, no desplegado)
 
 ## Arquitectura
 
@@ -293,6 +293,8 @@ Para detenerlo: `docker compose down`.
 ./gradlew validateStructure
 ```
 
+`ConcurrentPurchaseIntegrationTest` levanta DynamoDB Local y ElasticMQ con Testcontainers, usando el mismo script de tablas y la misma configuración de colas que docker-compose. Lanza 100 compras HTTP simultáneas sobre 20 entradas y comprueba que se reservan exactamente 20. Si no hay Docker disponible, se omite.
+
 `./gradlew build` falla si la cobertura de líneas de cualquier módulo baja del 90% (se excluyen el arranque, la configuración de Spring y los DTO). El informe de cada módulo queda en `<módulo>/build/reports/jacocoHtml/index.html`.
 
 ### Configuración
@@ -383,19 +385,82 @@ WebFlux ya es no bloqueante: unos pocos hilos atienden miles de peticiones concu
 ### Emuladores locales en lugar de LocalStack
 Desde la versión 2026.03.0, la imagen de LocalStack exige un token de autenticación. Para que `docker compose up` funcione en cualquier máquina sin cuentas ni secretos, se usan DynamoDB Local y ElasticMQ, compatible con la API de SQS (colas, DLQ, visibility timeout y long polling).
 
-## Seguridad *(rate limiting pendiente)*
+## Seguridad
 - Sin credenciales en el repositorio; la configuración entra por variables de entorno.
 - El contenedor se ejecuta con un usuario sin privilegios.
 - Los endpoints de administración exigen `X-Admin-Key`, leída solo de la variable de entorno `ADMIN_API_KEY` y comparada en tiempo constante. Sin clave configurada, quedan deshabilitados. El valor de docker-compose es solo para desarrollo local. En producción se sustituiría por un rol emitido por un servidor de autorización.
-- Un cliente no puede consultar ni confirmar órdenes ajenas: la confirmación de una orden de otro cliente responde `404`, igual que si no existiera.
+- Un cliente no puede confirmar órdenes ajenas: la confirmación de una orden de otro cliente responde `404`, igual que si no existiera. La consulta `GET /orders/{id}` todavía no valida al dueño; los ids son UUID aleatorios e impredecibles, pero la validación llegaría con JWT (ver limitaciones).
 - Los streams de disponibilidad se cierran a los 10 minutos para que conexiones inactivas no acaparen recursos.
 - Los 5xx nunca exponen detalles internos.
 - Idempotencia frente a reintentos maliciosos o del cliente: la misma `Idempotency-Key` con un cuerpo distinto responde `422`. Las claves se guardan por cliente, así que nadie puede colisionar con las de otro ni sondearlas.
 - Validación de entrada y máximo de 10 entradas por orden.
-- Rate limiting en la API para limitar el abuso de recursos.
+- **Rate limiting en dos capas.** En AWS, el WAF bloquea por IP antes de llegar a las tareas. En la aplicación, un token bucket por cliente (20 peticiones de ráfaga, 10 por segundo sostenidas) responde `429` con `Retry-After`. La tabla de buckets está acotada a 100.000 clientes y expulsa los inactivos, para que inventar ids no agote la memoria. El límite de la aplicación es por instancia.
 
-## Despliegue en AWS *(pendiente)*
-Infraestructura en Terraform, validada con `terraform validate` y `tflint`, sin desplegar: ECS Fargate (servicios api y worker), DynamoDB on-demand con PITR, SQS con DLQ, KMS, IAM de mínimo privilegio, VPC endpoints y CloudWatch.
+## Despliegue en AWS
+
+La infraestructura está en Terraform (`infra/terraform`). No se ha desplegado: se valida con `terraform validate` y `tflint` (con el ruleset de AWS), los dos sin avisos.
+
+```mermaid
+flowchart TB
+    user([Clientes]) --> waf[WAF<br/>límite por IP + reglas gestionadas]
+    waf --> alb[ALB HTTPS<br/>TLS 1.3]
+
+    subgraph vpc[VPC, 2 zonas de disponibilidad]
+        subgraph public[Subredes públicas]
+            alb
+        end
+        subgraph private[Subredes privadas, sin ruta a internet]
+            api[ECS Fargate: api<br/>escala por peticiones]
+            worker[ECS Fargate: worker<br/>Spot, escala por cola]
+            vpce[VPC endpoints<br/>SQS, ECR, Logs, KMS,<br/>Secrets Manager, STS]
+        end
+    end
+
+    alb --> api
+    api & worker --> vpce
+    api & worker -->|gateway endpoint| ddb[(DynamoDB<br/>on-demand, PITR, KMS)]
+    vpce --> sqs[[SQS + DLQ<br/>cifradas con KMS]]
+    vpce --> secrets[Secrets Manager<br/>clave de admin]
+    api & worker --> cw[CloudWatch<br/>logs y alarmas]
+    cw --> sns[SNS → on-call]
+```
+
+| Módulo | Contenido |
+|---|---|
+| `network` | VPC, subredes públicas y privadas en dos zonas, endpoints gateway (DynamoDB, S3) e interface (SQS, ECR, Logs, KMS, Secrets Manager, STS) |
+| `data` | Clave KMS con rotación, las 5 tablas con el mismo esquema que el entorno local, colas con DLQ y redrive policy |
+| `compute` | ECR, ECS con los servicios `api` y `worker`, ALB, WAF, IAM, autoscaling y el secreto de administrador |
+| `observability` | Alarmas, topic SNS y presupuesto mensual |
+| `stack` | Compone los cuatro; cada entorno solo cambia valores |
+
+`envs/dev` y `envs/prod` tienen cada uno su state en S3 (con locking nativo), su VPC con un rango que no se solapa y su dimensionamiento. Un error en dev nunca puede tocar prod.
+
+**Seguridad en la nube**
+- Las tareas corren en subredes privadas, sin IP pública y sin NAT. Llegan a AWS solo por VPC endpoints, y sus security groups solo permiten salir por 443 hacia la VPC.
+- Un IAM task role por rol, con acciones concretas sobre ARNs concretos. La API no puede consumir colas; el worker no puede escribir claves de idempotencia ni hacer `Scan`. La clave KMS solo se puede usar a través de DynamoDB y SQS (`kms:ViaService`).
+- No hay credenciales estáticas: la aplicación usa el task role. Por eso el bean de DynamoDB de los perfiles de AWS usa la cadena de credenciales por defecto; el `WebIdentityTokenFileCredentialsProvider` que traía el scaffold solo funciona en Kubernetes y en ECS habría fallado.
+- La clave de administrador vive en Secrets Manager. Terraform crea el secreto vacío y su valor se carga aparte, así que no aparece ni en el código ni en el state.
+- Imágenes inmutables con escaneo al subirlas, contenedores con el sistema de archivos de solo lectura, y TLS 1.3 en el balanceador.
+
+**Operación**
+- La API escala por peticiones por tarea y el worker por mensajes en la cola, cada uno por su lado.
+- El worker corre sobre Fargate Spot, con una tarea base on-demand. Una interrupción no pierde trabajo: el mensaje vuelve a la cola tras el visibility timeout.
+- Despliegues con circuit breaker y rollback automático. El health check del balanceador usa `/actuator/health/readiness`.
+- Point-in-time recovery en todas las tablas, y protección contra borrado en prod.
+
+**Costos**
+- DynamoDB on-demand: los picos de venta son impredecibles, así que pagar por petición sale más barato que aprovisionar para el pico.
+- VPC endpoints en lugar de NAT Gateway, que costaría unos 32 USD al mes por zona más el tráfico. Los endpoints gateway de DynamoDB y S3 son gratuitos.
+- Fargate Spot para el worker, Graviton (ARM64) en todas las tareas, long polling en SQS y retención de logs acotada (7 días en dev, 30 en prod).
+- Un presupuesto mensual por entorno avisa al 80% del gasto previsto.
+
+**Observabilidad**
+- Alarmas cuando hay cualquier mensaje en una DLQ, mensajes esperando más de 2 minutos, errores 5xx, latencia p99 por encima de 500 ms y throttling en cualquier tabla. Todas llegan al on-call por SNS.
+- Container Insights en el clúster y logs por rol en CloudWatch.
+
+**Gobernanza**
+- `default_tags` en el provider: Project, Environment, Stack, Owner, CostCenter y ManagedBy en todos los recursos sin repetirlos. El presupuesto filtra por el tag `Stack`.
+- Las versiones de Terraform y del provider están fijadas, con su lock file en el repositorio.
 
 ## Limitaciones y mejoras *(pendiente)*
 - Partición caliente en eventos muy populares; se mitigaría con contadores fragmentados (sharded counters).
