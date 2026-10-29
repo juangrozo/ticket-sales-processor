@@ -1,0 +1,58 @@
+name: ticket-sales-processor
+
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.2
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      - "8000:8000"
+
+  dynamodb-init:
+    image: amazon/aws-cli:2.38.6
+    entrypoint: ["sh", "/init/dynamodb-init.sh"]
+    environment:
+      DYNAMODB_ENDPOINT: http://dynamodb:8000
+      # Dummy values: DynamoDB Local does not validate credentials.
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./deployment/local/dynamodb-init.sh:/init/dynamodb-init.sh:ro
+    depends_on:
+      dynamodb:
+        condition: service_started
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.7.1
+    ports:
+      - "9324:9324"
+      - "9325:9325"
+    volumes:
+      - ./deployment/local/elasticmq.conf:/opt/elasticmq.conf:ro
+
+  app:
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      AWS_REGION: us-east-1
+      # Dummy values: the local emulators do not validate credentials.
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      DYNAMODB_ENDPOINT: http://dynamodb:8000
+      SQS_ENDPOINT: http://elasticmq:9324
+      ORDER_QUEUE_URL: http://elasticmq:9324/000000000000/order-placed
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
+      elasticmq:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
