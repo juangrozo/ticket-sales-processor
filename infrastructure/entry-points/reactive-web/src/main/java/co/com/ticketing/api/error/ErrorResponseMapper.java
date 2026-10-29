@@ -17,6 +17,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
@@ -29,7 +30,11 @@ public class ErrorResponseMapper {
 
     public Mono<ServerResponse> toResponse(Throwable error, ServerRequest request) {
         HttpStatus status = statusOf(error);
-        String detail = status.is5xxServerError() ? "Unexpected error" : error.getMessage();
+        String detail = switch (error) {
+            case Throwable _ when status.is5xxServerError() -> "Unexpected error";
+            case ResponseStatusException statusError -> statusError.getReason();
+            default -> error.getMessage();
+        };
         if (status.is5xxServerError()) {
             log.error("Unexpected error on {} {}", request.method(), request.path(), error);
         }
@@ -42,6 +47,7 @@ public class ErrorResponseMapper {
         return switch (error) {
             case DomainException domainError -> statusOf(domainError);
             case ServerWebInputException _, CodecException _ -> HttpStatus.BAD_REQUEST;
+            case ResponseStatusException statusError -> HttpStatus.valueOf(statusError.getStatusCode().value());
             default -> HttpStatus.INTERNAL_SERVER_ERROR;
         };
     }

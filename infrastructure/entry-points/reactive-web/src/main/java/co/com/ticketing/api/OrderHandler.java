@@ -3,6 +3,7 @@ package co.com.ticketing.api;
 import co.com.ticketing.api.dto.OrderResponse;
 import co.com.ticketing.api.dto.PlaceOrderRequest;
 import co.com.ticketing.model.exception.DomainValidationException;
+import co.com.ticketing.usecase.confirmorder.ConfirmOrderUseCase;
 import co.com.ticketing.usecase.getorder.GetOrderUseCase;
 import co.com.ticketing.usecase.placeorder.PlaceOrderUseCase;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +24,7 @@ public class OrderHandler {
 
     private final PlaceOrderUseCase placeOrderUseCase;
     private final GetOrderUseCase getOrderUseCase;
+    private final ConfirmOrderUseCase confirmOrderUseCase;
 
     /** Answers 202 as soon as the order is stored and queued; the reservation happens asynchronously. */
     public Mono<ServerResponse> place(ServerRequest request) {
@@ -36,6 +38,15 @@ public class OrderHandler {
                             String idempotencyKey = request.headers().firstHeader(IDEMPOTENCY_HEADER);
                             return placeOrderUseCase.place(body.eventId(), customerId, body.quantity(), idempotencyKey);
                         }))
+                .flatMap(order -> ServerResponse.accepted()
+                        .location(URI.create("/orders/" + order.orderId()))
+                        .bodyValue(OrderResponse.from(order)));
+    }
+
+    /** Answers 202: the tickets are held as PENDING_CONFIRMATION and the payment runs asynchronously. */
+    public Mono<ServerResponse> confirm(ServerRequest request) {
+        return Mono.fromCallable(() -> customerId(request))
+                .flatMap(customerId -> confirmOrderUseCase.requestConfirmation(request.pathVariable("orderId"), customerId))
                 .flatMap(order -> ServerResponse.accepted()
                         .location(URI.create("/orders/" + order.orderId()))
                         .bodyValue(OrderResponse.from(order)));
