@@ -51,7 +51,7 @@ class RouterRestTest {
     private static final Event EVENT = Event.create("e-1", "Rock Fest", "Arena", STARTS_AT, 100, NOW);
     private static final Order ORDER = Order.place("o-1", "e-1", "c-1", 2, NOW);
     private static final ApiProperties PROPERTIES =
-            new ApiProperties("admin-secret", Duration.ofSeconds(2), Duration.ofSeconds(10));
+            new ApiProperties("admin-secret", Duration.ofSeconds(2), Duration.ofSeconds(10), 20, 10);
 
     @Mock
     private CreateEventUseCase createEventUseCase;
@@ -336,7 +336,7 @@ class RouterRestTest {
 
     @Test
     void adminApiShouldBeDisabledWithoutConfiguredKey() {
-        var disabled = new AdminAuthorizer(new ApiProperties(" ", Duration.ofSeconds(1), Duration.ofSeconds(1)));
+        var disabled = new AdminAuthorizer(new ApiProperties(" ", Duration.ofSeconds(1), Duration.ofSeconds(1), 20, 10));
         var router = new RouterRest().routerFunction(
                 new EventHandler(createEventUseCase, getEventUseCase, assignComplimentaryUseCase, disabled, PROPERTIES),
                 new OrderHandler(placeOrderUseCase, getOrderUseCase, confirmOrderUseCase),

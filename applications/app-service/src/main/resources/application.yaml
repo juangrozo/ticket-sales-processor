@@ -15,6 +15,9 @@ app:
     admin-api-key: "${ADMIN_API_KEY:}"
     availability-poll-interval: "2s"
     availability-max-duration: "10m"
+    # Per client: bursts of 20 requests, 10 per second sustained
+    rate-limit-capacity: 20
+    rate-limit-per-second: 10
   sweeper:
     interval: "${SWEEPER_INTERVAL:30s}"
 aws:
