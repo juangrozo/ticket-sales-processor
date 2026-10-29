@@ -9,6 +9,7 @@ import co.com.ticketing.model.event.Event;
 import co.com.ticketing.model.exception.DuplicateIdempotencyKeyException;
 import co.com.ticketing.model.idempotency.IdempotencyRecord;
 import co.com.ticketing.model.order.Order;
+import co.com.ticketing.model.order.OrderStatus;
 import co.com.ticketing.model.ticket.Ticket;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -155,6 +156,26 @@ class DynamoRepositoriesTest {
         when(client.getItem(any(GetItemRequest.class))).thenReturn(noItem());
 
         StepVerifier.create(new DynamoOrderRepository(client, TABLES).findById("o-1")).verifyComplete();
+    }
+
+    @Test
+    void shouldQueryStatusIndexWithinTimeWindow() {
+        when(client.queryPaginator(any(QueryRequest.class))).thenCallRealMethod();
+        when(client.query(any(QueryRequest.class))).thenReturn(CompletableFuture.completedFuture(
+                QueryResponse.builder().items(OrderItemMapper.toItem(ORDER), OrderItemMapper.toItem(ORDER)).build()));
+
+        StepVerifier.create(new DynamoOrderRepository(client, TABLES)
+                        .findByStatusChangedBetween(OrderStatus.PENDING, NOW.minusSeconds(60), NOW, 1))
+                .expectNext(ORDER)
+                .verifyComplete();
+
+        ArgumentCaptor<QueryRequest> captor = ArgumentCaptor.forClass(QueryRequest.class);
+        verify(client).query(captor.capture());
+        QueryRequest request = captor.getValue();
+        assertThat(request.indexName()).isEqualTo(DynamoOrderRepository.STATUS_INDEX);
+        assertThat(request.keyConditionExpression()).isEqualTo("#status = :status AND #changedAt BETWEEN :from AND :to");
+        assertThat(request.expressionAttributeValues().get(":to").n()).isEqualTo(Long.toString(NOW.toEpochMilli()));
+        assertThat(request.limit()).isEqualTo(1);
     }
 
     @Test

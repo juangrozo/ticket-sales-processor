@@ -13,6 +13,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Duration;
 
+/** One queue per step of the purchase, so each consumer scales and fails on its own. */
 @Service
 @Log4j2
 @RequiredArgsConstructor
@@ -23,22 +24,27 @@ public class SQSSender implements OrderEventPublisher {
     private final SQSSenderProperties properties;
     private final SqsAsyncClient client;
 
-    public record OrderPlacedMessage(String orderId) {
+    public record OrderMessage(String orderId) {
     }
 
     @Override
     public Mono<Void> publishOrderPlaced(String orderId) {
-        return Mono.fromCallable(() -> buildRequest(JSON.writeValueAsString(new OrderPlacedMessage(orderId))))
-                .flatMap(request -> Mono.fromFuture(() -> client.sendMessage(request)))
-                .retryWhen(Retry.backoff(2, Duration.ofMillis(100)).onRetryExhaustedThrow((_, signal) -> signal.failure()))
-                .doOnNext(response -> log.debug("Order {} queued as message {}", orderId, response.messageId()))
-                .then();
+        return send(properties.queueUrl(), orderId);
     }
 
-    private SendMessageRequest buildRequest(String message) {
-        return SendMessageRequest.builder()
-                .queueUrl(properties.queueUrl())
-                .messageBody(message)
-                .build();
+    @Override
+    public Mono<Void> publishConfirmationRequested(String orderId) {
+        return send(properties.confirmationQueueUrl(), orderId);
+    }
+
+    private Mono<Void> send(String queueUrl, String orderId) {
+        return Mono.fromCallable(() -> SendMessageRequest.builder()
+                        .queueUrl(queueUrl)
+                        .messageBody(JSON.writeValueAsString(new OrderMessage(orderId)))
+                        .build())
+                .flatMap(request -> Mono.fromFuture(() -> client.sendMessage(request)))
+                .retryWhen(Retry.backoff(2, Duration.ofMillis(100)).onRetryExhaustedThrow((_, signal) -> signal.failure()))
+                .doOnNext(response -> log.debug("Order {} sent to {} as {}", orderId, queueUrl, response.messageId()))
+                .then();
     }
 }

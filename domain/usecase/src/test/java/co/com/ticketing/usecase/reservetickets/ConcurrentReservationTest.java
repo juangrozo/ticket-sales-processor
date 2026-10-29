@@ -6,6 +6,7 @@ import co.com.ticketing.model.order.OrderStatus;
 import co.com.ticketing.model.order.gateways.OrderEventPublisher;
 import co.com.ticketing.usecase.placeorder.PlaceOrderUseCase;
 import co.com.ticketing.usecase.support.InMemoryTicketingStore;
+import co.com.ticketing.usecase.support.RecordingPublisher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
@@ -41,7 +42,7 @@ class ConcurrentReservationTest {
     @BeforeEach
     void setUp() {
         store = new InMemoryTicketingStore();
-        OrderEventPublisher noQueue = _ -> Mono.empty();
+        OrderEventPublisher noQueue = new RecordingPublisher();
         placeOrder = new PlaceOrderUseCase(store.eventRepository(), store.orderRepository(),
                 store.idempotencyRepository(), noQueue, CLOCK);
         reserveTickets = new ReserveTicketsUseCase(store.orderRepository(), store.stateChangeRepository(), CLOCK);

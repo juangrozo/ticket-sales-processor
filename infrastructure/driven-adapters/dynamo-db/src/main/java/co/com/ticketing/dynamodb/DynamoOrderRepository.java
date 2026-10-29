@@ -8,18 +8,22 @@ import co.com.ticketing.model.audit.AuditEntry;
 import co.com.ticketing.model.exception.DuplicateIdempotencyKeyException;
 import co.com.ticketing.model.idempotency.IdempotencyRecord;
 import co.com.ticketing.model.order.Order;
+import co.com.ticketing.model.order.OrderStatus;
 import co.com.ticketing.model.order.gateways.OrderRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Repository;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.Put;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 
+import java.time.Instant;
 import java.util.Map;
 
 @Repository
@@ -27,6 +31,7 @@ import java.util.Map;
 public class DynamoOrderRepository implements OrderRepository {
 
     private static final int IDEMPOTENCY_WRITE = 0;
+    static final String STATUS_INDEX = "orderStatus-statusChangedAt-index";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbTables tables;
@@ -64,6 +69,27 @@ public class DynamoOrderRepository implements OrderRepository {
         return Mono.fromFuture(() -> client.getItem(request))
                 .filter(response -> response.hasItem() && !response.item().isEmpty())
                 .map(response -> OrderItemMapper.fromItem(response.item()));
+    }
+
+    /** Query on the status index, never a Scan: cost grows with the matching orders, not with the table. */
+    @Override
+    public Flux<Order> findByStatusChangedBetween(OrderStatus status, Instant from, Instant to, int limit) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(tables.orders())
+                .indexName(STATUS_INDEX)
+                .keyConditionExpression("#status = :status AND #changedAt BETWEEN :from AND :to")
+                .expressionAttributeNames(Map.of(
+                        "#status", OrderItemMapper.ORDER_STATUS,
+                        "#changedAt", OrderItemMapper.STATUS_CHANGED_AT))
+                .expressionAttributeValues(Map.of(
+                        ":status", AttributeValue.fromS(status.name()),
+                        ":from", AttributeValue.fromN(Long.toString(from.toEpochMilli())),
+                        ":to", AttributeValue.fromN(Long.toString(to.toEpochMilli()))))
+                .limit(limit)
+                .build();
+        return Flux.from(client.queryPaginator(request).items())
+                .take(limit)
+                .map(OrderItemMapper::fromItem);
     }
 
     private static TransactWriteItem putIfAbsent(String table, Map<String, AttributeValue> item, String keyAttribute) {

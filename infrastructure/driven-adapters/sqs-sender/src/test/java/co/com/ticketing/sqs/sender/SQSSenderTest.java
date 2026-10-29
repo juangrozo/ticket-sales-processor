@@ -26,7 +26,8 @@ import static org.mockito.Mockito.when;
 class SQSSenderTest {
 
     private static final SQSSenderProperties PROPERTIES =
-            new SQSSenderProperties("us-east-1", "http://localhost:9324/000000000000/order-placed", "http://localhost:9324");
+            new SQSSenderProperties("us-east-1", "http://localhost:9324/000000000000/order-placed", "http://localhost:9324",
+                    "http://localhost:9324/000000000000/order-confirmation");
 
     @Mock
     private SqsAsyncClient client;
@@ -48,6 +49,19 @@ class SQSSenderTest {
         ArgumentCaptor<SendMessageRequest> captor = ArgumentCaptor.forClass(SendMessageRequest.class);
         verify(client).sendMessage(captor.capture());
         assertThat(captor.getValue().queueUrl()).isEqualTo(PROPERTIES.queueUrl());
+        assertThat(captor.getValue().messageBody()).isEqualTo("{\"orderId\":\"o-1\"}");
+    }
+
+    @Test
+    void shouldSendConfirmationToItsOwnQueue() {
+        when(client.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(CompletableFuture.completedFuture(SendMessageResponse.builder().messageId("m-2").build()));
+
+        StepVerifier.create(sender.publishConfirmationRequested("o-1")).verifyComplete();
+
+        ArgumentCaptor<SendMessageRequest> captor = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(client).sendMessage(captor.capture());
+        assertThat(captor.getValue().queueUrl()).isEqualTo(PROPERTIES.confirmationQueueUrl());
         assertThat(captor.getValue().messageBody()).isEqualTo("{\"orderId\":\"o-1\"}");
     }
 
@@ -77,6 +91,6 @@ class SQSSenderTest {
         SQSSenderConfig config = new SQSSenderConfig();
 
         assertThat(config.configSqs(PROPERTIES, LoggingMetricPublisher.create())).isNotNull();
-        assertThat(config.configSqs(new SQSSenderProperties("us-east-1", "q", " "), LoggingMetricPublisher.create())).isNotNull();
+        assertThat(config.configSqs(new SQSSenderProperties("us-east-1", "q", " ", "c"), LoggingMetricPublisher.create())).isNotNull();
     }
 }

@@ -5,6 +5,9 @@ import co.com.ticketing.model.exception.InsufficientInventoryException;
 import co.com.ticketing.model.exception.InvalidStateTransitionException;
 import co.com.ticketing.model.ticket.TicketStatus;
 
+import java.util.Arrays;
+import java.util.function.Predicate;
+
 /**
  * Ticket counters of an event, one per {@link TicketStatus}. Persistence applies the same
  * moves as atomic conditional updates; this type keeps the rules in the domain and backs
@@ -24,6 +27,20 @@ public record Inventory(int available, int reserved, int pendingConfirmation, in
 
     public int total() {
         return available + reserved + pendingConfirmation + sold + complimentary;
+    }
+
+    /** Tickets that count as sales in accounting reports. */
+    public int accountable() {
+        return sumWhere(TicketStatus::isAccountable);
+    }
+
+    /** Tickets reserved or pending confirmation: unavailable, but not sold. */
+    public int onHold() {
+        return sumWhere(TicketStatus::isOnHold);
+    }
+
+    private int sumWhere(Predicate<TicketStatus> condition) {
+        return Arrays.stream(TicketStatus.values()).filter(condition).mapToInt(this::count).sum();
     }
 
     public int count(TicketStatus status) {

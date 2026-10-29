@@ -14,6 +14,7 @@ import java.util.Objects;
  * Everything one business transition changes, persisted all-or-nothing (Unit of Work).
  * The audit trail is derived from the change itself, so no transition can be stored without it.
  *
+ * @param orderBefore   null when the transition creates the order
  * @param inventoryMove null when the transition does not touch the event counters
  */
 public record StateChange(Order orderBefore, Order orderAfter, InventoryMove inventoryMove,
@@ -26,9 +27,8 @@ public record StateChange(Order orderBefore, Order orderAfter, InventoryMove inv
     }
 
     public StateChange {
-        Objects.requireNonNull(orderBefore, "orderBefore");
         Objects.requireNonNull(orderAfter, "orderAfter");
-        if (!orderBefore.orderId().equals(orderAfter.orderId())) {
+        if (orderBefore != null && !orderBefore.orderId().equals(orderAfter.orderId())) {
             throw new DomainValidationException("A state change must apply to a single order");
         }
         createdTickets = List.copyOf(createdTickets);
@@ -41,13 +41,43 @@ public record StateChange(Order orderBefore, Order orderAfter, InventoryMove inv
                 tickets, List.of());
     }
 
+    /** A complimentary grant: the order is created already final, with its tickets taken from AVAILABLE. */
+    public static StateChange complimentary(Order order, List<Ticket> tickets) {
+        return new StateChange(null, order,
+                new InventoryMove(order.eventId(), TicketStatus.AVAILABLE, TicketStatus.COMPLIMENTARY, tickets.size()),
+                tickets, List.of());
+    }
+
+    /**
+     * Moves the order and all its tickets together, and the same number of tickets between the event
+     * counters. Every ticket must currently be in {@code from}.
+     */
+    public static StateChange transition(Order before, Order after, List<Ticket> tickets,
+                                         TicketStatus from, TicketStatus to) {
+        List<TicketChange> changes = tickets.stream()
+                .map(ticket -> {
+                    if (ticket.status() != from) {
+                        throw new DomainValidationException("Ticket %s is %s, expected %s"
+                                .formatted(ticket.ticketId(), ticket.status(), from));
+                    }
+                    return new TicketChange(ticket, ticket.transitionTo(to, after.statusChangedAt()));
+                })
+                .toList();
+        return new StateChange(before, after, new InventoryMove(before.eventId(), from, to, tickets.size()),
+                List.of(), changes);
+    }
+
     public static StateChange orderOnly(Order before, Order after) {
-        return new StateChange(before, after, null, List.of(), List.of());
+        return new StateChange(Objects.requireNonNull(before, "orderBefore"), after, null, List.of(), List.of());
+    }
+
+    public boolean createsOrder() {
+        return orderBefore == null;
     }
 
     public List<AuditEntry> auditEntries() {
         List<AuditEntry> entries = new ArrayList<>();
-        entries.add(AuditEntry.orderChanged(orderBefore, orderAfter));
+        entries.add(createsOrder() ? AuditEntry.orderCreated(orderAfter) : AuditEntry.orderChanged(orderBefore, orderAfter));
         createdTickets.forEach(ticket -> entries.add(AuditEntry.ticketCreated(ticket)));
         changedTickets.forEach(change -> entries.add(AuditEntry.ticketChanged(change.before(), change.after())));
         return entries;

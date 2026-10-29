@@ -39,6 +39,14 @@ class InventoryTest {
         assertThat(inventory.total()).isEqualTo(100);
     }
 
+    @Test
+    void complimentaryShouldNotCountForAccounting() {
+        Inventory inventory = new Inventory(10, 2, 3, 4, 5);
+
+        assertThat(inventory.accountable()).isEqualTo(4);
+        assertThat(inventory.onHold()).isEqualTo(5);
+    }
+
     @ParameterizedTest
     @EnumSource(TicketStatus.class)
     void countShouldReturnCounterOfEachStatus(TicketStatus status) {

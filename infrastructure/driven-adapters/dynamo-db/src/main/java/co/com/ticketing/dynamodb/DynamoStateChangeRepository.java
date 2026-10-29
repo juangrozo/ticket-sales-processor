@@ -73,8 +73,19 @@ public class DynamoStateChangeRepository implements StateChangeRepository {
         return writes;
     }
 
-    /** Optimistic locking: the order is replaced only if nobody changed it since it was read. */
+    /**
+     * Optimistic locking: the order is replaced only if nobody changed it since it was read. A new
+     * order is written only if its id is not taken.
+     */
     private TransactWriteItem orderWrite(Order before, Order after) {
+        if (before == null) {
+            return TransactWriteItem.builder().put(Put.builder()
+                    .tableName(tables.orders())
+                    .item(OrderItemMapper.toItem(after))
+                    .conditionExpression("attribute_not_exists(#orderId)")
+                    .expressionAttributeNames(Map.of("#orderId", OrderItemMapper.ORDER_ID))
+                    .build()).build();
+        }
         return TransactWriteItem.builder().put(Put.builder()
                 .tableName(tables.orders())
                 .item(OrderItemMapper.toItem(after))
@@ -130,10 +141,10 @@ public class DynamoStateChangeRepository implements StateChangeRepository {
         for (int i = 0; i < writes.size(); i++) {
             if (TransactionSupport.failedConditionAt(error, i)) {
                 return switch (writes.get(i).target()) {
-                    case ORDER -> new ConcurrentUpdateException("Order", change.orderBefore().orderId());
+                    case ORDER -> new ConcurrentUpdateException("Order", change.orderAfter().orderId());
                     case INVENTORY -> new InsufficientInventoryException(
                             change.inventoryMove().eventId(), change.inventoryMove().quantity());
-                    case TICKET, AUDIT -> new ConcurrentUpdateException("Ticket of order", change.orderBefore().orderId());
+                    case TICKET, AUDIT -> new ConcurrentUpdateException("Ticket of order", change.orderAfter().orderId());
                 };
             }
         }

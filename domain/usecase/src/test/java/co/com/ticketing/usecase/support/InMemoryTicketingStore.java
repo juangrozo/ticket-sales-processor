@@ -11,12 +11,14 @@ import co.com.ticketing.model.exception.InsufficientInventoryException;
 import co.com.ticketing.model.idempotency.IdempotencyRecord;
 import co.com.ticketing.model.idempotency.gateways.IdempotencyRepository;
 import co.com.ticketing.model.order.Order;
+import co.com.ticketing.model.order.OrderStatus;
 import co.com.ticketing.model.order.gateways.OrderRepository;
 import co.com.ticketing.model.ticket.Ticket;
 import co.com.ticketing.model.ticket.gateways.TicketRepository;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -81,6 +83,15 @@ public class InMemoryTicketingStore {
             public Mono<Order> findById(String orderId) {
                 return Mono.fromSupplier(() -> atomically(() -> orders.get(orderId)));
             }
+
+            @Override
+            public Flux<Order> findByStatusChangedBetween(OrderStatus status, Instant from, Instant to, int limit) {
+                return Flux.defer(() -> Flux.fromIterable(atomically(() -> orders.values().stream()
+                        .filter(order -> order.status() == status)
+                        .filter(order -> !order.statusChangedAt().isBefore(from) && !order.statusChangedAt().isAfter(to))
+                        .limit(limit)
+                        .toList())));
+            }
         };
     }
 
@@ -102,10 +113,14 @@ public class InMemoryTicketingStore {
     }
 
     private void applyAtomically(StateChange change) {
+        String orderId = change.orderAfter().orderId();
         Order expected = change.orderBefore();
-        Order stored = orders.get(expected.orderId());
-        if (stored == null || stored.version() != expected.version() || stored.status() != expected.status()) {
-            throw new ConcurrentUpdateException("Order", expected.orderId());
+        Order stored = orders.get(orderId);
+        boolean orderMatches = change.createsOrder()
+                ? stored == null
+                : stored != null && stored.version() == expected.version() && stored.status() == expected.status();
+        if (!orderMatches) {
+            throw new ConcurrentUpdateException("Order", orderId);
         }
         for (StateChange.TicketChange ticketChange : change.changedTickets()) {
             Ticket current = tickets.get(ticketChange.before().ticketId());
@@ -123,7 +138,7 @@ public class InMemoryTicketingStore {
             movedEvent = event.moveTickets(move.from(), move.to(), move.quantity());
         }
         // Every condition passed: apply all writes together
-        orders.put(expected.orderId(), change.orderAfter());
+        orders.put(orderId, change.orderAfter());
         if (movedEvent != null) {
             events.put(movedEvent.eventId(), movedEvent);
         }

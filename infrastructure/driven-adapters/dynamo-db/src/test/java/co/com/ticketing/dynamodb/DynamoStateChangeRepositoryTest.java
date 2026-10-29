@@ -88,6 +88,21 @@ class DynamoStateChangeRepositoryTest {
     }
 
     @Test
+    void creationShouldWriteOrderOnlyIfAbsent() {
+        Order grant = Order.complimentary("o-9", "e-1", "vip-1", 1, NOW);
+        when(client.transactWriteItems(any(TransactWriteItemsRequest.class))).thenReturn(success());
+
+        StepVerifier.create(repository.apply(StateChange.complimentary(grant,
+                List.of(Ticket.complimentary("t-9", "o-9", "e-1", NOW))))).verifyComplete();
+
+        ArgumentCaptor<TransactWriteItemsRequest> captor = ArgumentCaptor.forClass(TransactWriteItemsRequest.class);
+        verify(client).transactWriteItems(captor.capture());
+        List<TransactWriteItem> items = captor.getValue().transactItems();
+        assertThat(items.get(0).put().conditionExpression()).isEqualTo("attribute_not_exists(#orderId)");
+        assertThat(items.get(1).update().expressionAttributeNames()).containsEntry("#to", "complimentary");
+    }
+
+    @Test
     void failedInventoryConditionShouldMeanInsufficientInventory() {
         when(client.transactWriteItems(any(TransactWriteItemsRequest.class)))
                 .thenReturn(canceled("None", "ConditionalCheckFailed", "None", "None", "None", "None", "None"));

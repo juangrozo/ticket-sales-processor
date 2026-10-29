@@ -48,6 +48,13 @@ class TicketStatusTest {
 
     @ParameterizedTest
     @EnumSource(TicketStatus.class)
+    void onlyReservedAndPendingShouldBeOnHold(TicketStatus status) {
+        assertThat(status.isOnHold())
+                .isEqualTo(status == TicketStatus.RESERVED || status == TicketStatus.PENDING_CONFIRMATION);
+    }
+
+    @ParameterizedTest
+    @EnumSource(TicketStatus.class)
     void onlySoldShouldBeAccountable(TicketStatus status) {
         assertThat(status.isAccountable()).isEqualTo(status == SOLD);
         assertThat(COMPLIMENTARY.isAccountable()).isFalse();

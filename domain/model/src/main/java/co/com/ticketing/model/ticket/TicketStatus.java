@@ -29,4 +29,9 @@ public enum TicketStatus {
     public boolean isAccountable() {
         return this == SOLD;
     }
+
+    /** Taken from inventory but not sold yet: held for a customer who may still release it. */
+    public boolean isOnHold() {
+        return this == RESERVED || this == PENDING_CONFIRMATION;
+    }
 }
