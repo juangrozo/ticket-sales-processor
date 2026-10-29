@@ -10,6 +10,13 @@ spring:
 app:
   # api: HTTP only; worker: queue consumer and scheduled jobs only; all: both (local development and tests)
   role: "${APP_ROLE:all}"
+  api:
+    # Secret: comes only from the environment. Blank disables the admin endpoints.
+    admin-api-key: "${ADMIN_API_KEY:}"
+    availability-poll-interval: "2s"
+    availability-max-duration: "10m"
+  sweeper:
+    interval: "${SWEEPER_INTERVAL:30s}"
 aws:
   region: "${AWS_REGION:us-east-1}"
   dynamodb:
@@ -24,6 +31,7 @@ adapter:
   sqs:
     region: "${AWS_REGION:us-east-1}"
     queueUrl: "${ORDER_QUEUE_URL:http://localhost:9324/000000000000/order-placed}"
+    confirmationQueueUrl: "${CONFIRMATION_QUEUE_URL:http://localhost:9324/000000000000/order-confirmation}"
     endpoint: "${SQS_ENDPOINT:http://localhost:9324}"
 management:
   endpoints:
@@ -41,6 +49,7 @@ entrypoint:
     region: "${AWS_REGION:us-east-1}"
     endpoint: "${SQS_ENDPOINT:http://localhost:9324}"
     queueUrl: "${ORDER_QUEUE_URL:http://localhost:9324/000000000000/order-placed}"
+    confirmationQueueUrl: "${CONFIRMATION_QUEUE_URL:http://localhost:9324/000000000000/order-confirmation}"
     waitTimeSeconds: 20
     maxNumberOfMessages: 10
     visibilityTimeoutSeconds: 30

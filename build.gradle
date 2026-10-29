@@ -32,4 +32,33 @@ subprojects {
         // Required by BlockHound to instrument the JDK at runtime
         jvmArgs '-XX:+AllowRedefinitionToAddDeleteMethods', '-XX:+EnableDynamicAgentLoading'
     }
+
+    // Coverage gate: the build fails below 90% line coverage. Bootstrapping, Spring wiring and
+    // plain data carriers are excluded because they hold no logic worth testing.
+    plugins.withId('jacoco') {
+        def coverageExclusions = ['**/MainApplication*', '**/config/**', '**/dto/**']
+        afterEvaluate {
+            [tasks.named('jacocoTestReport'), tasks.named('jacocoTestCoverageVerification')].each { task ->
+                task.configure {
+                    classDirectories.setFrom(files(classDirectories.files.collect {
+                        fileTree(it) { exclude coverageExclusions }
+                    }))
+                }
+            }
+        }
+        tasks.named('jacocoTestCoverageVerification') {
+            dependsOn tasks.named('test')
+            violationRules {
+                rule {
+                    limit {
+                        counter = 'LINE'
+                        minimum = 0.90
+                    }
+                }
+            }
+        }
+        tasks.named('check') {
+            dependsOn tasks.named('jacocoTestCoverageVerification')
+        }
+    }
 }
