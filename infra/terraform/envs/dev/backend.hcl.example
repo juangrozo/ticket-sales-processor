@@ -1,0 +1,4 @@
+# Copy to backend.hcl (not committed) and adjust.
+bucket = "ticketing-terraform-state-dev"
+key    = "ticketing/dev/terraform.tfstate"
+region = "us-east-1"
