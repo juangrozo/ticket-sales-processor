@@ -3,6 +3,7 @@ package co.com.ticketing.usecase.getevent;
 import co.com.ticketing.model.event.Event;
 import co.com.ticketing.model.event.gateways.EventRepository;
 import co.com.ticketing.model.exception.ResourceNotFoundException;
+import co.com.ticketing.model.ticket.TicketStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -12,6 +13,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
+import java.time.Duration;
 import java.time.Instant;
 
 import static org.mockito.Mockito.when;
@@ -40,6 +42,31 @@ class GetEventUseCaseTest {
         when(eventRepository.findById("e-1")).thenReturn(Mono.empty());
 
         StepVerifier.create(useCase.get("e-1")).expectError(ResourceNotFoundException.class).verify();
+    }
+
+    @Test
+    void shouldStreamInventoryOnlyWhenItChanges() {
+        Event reserved = EVENT.moveTickets(TicketStatus.AVAILABLE,
+                TicketStatus.RESERVED, 2);
+        when(eventRepository.findById("e-1"))
+                .thenReturn(Mono.just(EVENT), Mono.just(EVENT), Mono.just(EVENT), Mono.just(reserved), Mono.just(reserved));
+
+        StepVerifier.withVirtualTime(() -> useCase.watchInventory("e-1", Duration.ofSeconds(2), Duration.ofSeconds(7)))
+                .expectSubscription()
+                .expectNext(EVENT.inventory())
+                .thenAwait(Duration.ofSeconds(4))
+                .expectNext(reserved.inventory())
+                .thenAwait(Duration.ofSeconds(4))
+                .verifyComplete();
+    }
+
+    @Test
+    void streamOfUnknownEventShouldFail() {
+        when(eventRepository.findById("e-9")).thenReturn(Mono.empty());
+
+        StepVerifier.create(useCase.watchInventory("e-9", Duration.ofSeconds(2), Duration.ofSeconds(10)))
+                .expectError(ResourceNotFoundException.class)
+                .verify();
     }
 
     @Test
