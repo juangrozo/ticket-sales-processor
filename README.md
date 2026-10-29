@@ -27,17 +27,22 @@ Backend reactivo y orientado a eventos para la venta de entradas a eventos (conc
 flowchart LR
     client([Cliente]) -->|HTTP| api
 
+    admin([Admin]) -->|HTTP + X-Admin-Key| api
+
     subgraph app[Aplicación: una imagen, dos roles]
         api[api<br/>WebFlux]
-        worker[worker<br/>listener SQS + scheduler]
+        worker[worker<br/>listeners SQS + barrido periódico]
     end
 
-    api -->|PutItem orden PENDING| ddb[(DynamoDB)]
+    api -->|orden PENDING, confirmación,<br/>cortesías, lecturas| ddb[(DynamoDB)]
     api -->|SendMessage| q1[[order-placed]]
-    q1 --> worker
-    worker -->|TransactWriteItems<br/>orden + inventario + tickets + auditoría| ddb
     api -->|SendMessage| q2[[order-confirmation]]
-    q2 --> worker
+    q1 -->|reservar| worker
+    q2 -->|cobrar| worker
+    worker -->|TransactWriteItems<br/>orden + inventario + tickets + auditoría| ddb
+    worker -->|cobro| pay[Pasarela de pago<br/>simulada]
+    worker -. reencola órdenes atascadas .-> q1
+    worker -. reencola órdenes atascadas .-> q2
     q1 -. 5 intentos fallidos .-> dlq1[[order-placed-dlq]]
     q2 -. 5 intentos fallidos .-> dlq2[[order-confirmation-dlq]]
 ```
@@ -47,14 +52,14 @@ flowchart LR
 | Capa | Módulo | Contenido |
 |---|---|---|
 | Dominio | `domain/model` | Entidades (records), máquinas de estado, errores de negocio y puertos (gateways). Sin dependencias de frameworks. |
-| Casos de uso | `domain/usecase` | Orquestación reactiva de los flujos de negocio. *(pendiente)* |
-| Infraestructura | `infrastructure/driven-adapters` | DynamoDB y SQS (envío). |
-| Infraestructura | `infrastructure/entry-points` | API WebFlux y listener de SQS. |
+| Casos de uso | `domain/usecase` | Orquestación reactiva: crear y consultar eventos, crear, reservar, confirmar y cobrar órdenes, cortesías y el barrido de expiración. |
+| Infraestructura | `infrastructure/driven-adapters` | DynamoDB, SQS (envío) y la pasarela de pago simulada. |
+| Infraestructura | `infrastructure/entry-points` | API WebFlux, listeners de SQS y el barrido periódico. |
 | Aplicación | `applications/app-service` | Ensamblado, configuración y arranque. |
 
 `./gradlew validateStructure` y los tests de ArchUnit verifican que las dependencias entre capas apunten siempre hacia el dominio.
 
-**Roles api y worker**: es una sola aplicación y una sola imagen, que arranca en el rol `api`, `worker` o `all` según la variable `APP_ROLE`. El rol `api` solo expone HTTP; el `worker` solo consume la cola (y, más adelante, ejecuta los procesos periódicos). En producción permite escalar la API por peticiones y el worker por profundidad de cola, aislar la carga pesada de la latencia HTTP y dar a cada rol su propio IAM role de mínimo privilegio. El rol `all` se usa en desarrollo y en los tests.
+**Roles api y worker**: es una sola aplicación y una sola imagen, que arranca en el rol `api`, `worker` o `all` según la variable `APP_ROLE`. El rol `api` solo expone HTTP; el `worker` solo consume las colas y ejecuta el barrido periódico. En producción permite escalar la API por peticiones y el worker por profundidad de cola, aislar la carga pesada de la latencia HTTP y dar a cada rol su propio IAM role de mínimo privilegio. El rol `all` se usa en desarrollo y en los tests.
 
 ## Modelo de estados
 
@@ -119,14 +124,87 @@ sequenceDiagram
     end
     W->>Q: DeleteMessage (solo tras procesar)
     C->>A: POST /orders/{id}/confirm
-    A->>D: orden → CONFIRMING si expiresAt > now<br/>tickets → PENDING_CONFIRMATION
+    A->>D: TransactWriteItems (si es del cliente y expiresAt > now)<br/>orden → CONFIRMING, tickets → PENDING_CONFIRMATION<br/>reserved -= n, pendingConfirmation += n
     A->>Q: SendMessage order-confirmation
     A-->>C: 202 Accepted
     Q->>W: ReceiveMessage
-    W->>D: pago simulado: tickets → SOLD, orden → CONFIRMED
+    W->>W: cobro en la pasarela (idempotente por orderId)
+    alt pago aprobado
+        W->>D: orden → CONFIRMED, tickets → SOLD
+    else pago rechazado
+        W->>D: orden → REJECTED, tickets → AVAILABLE
+    end
 ```
 
-Un proceso periódico (`@Scheduled`) libera las reservas vencidas y reencola las órdenes que se quedaron en PENDING *(pendiente)*.
+Confirmar la orden de otro cliente responde `404`, para no revelar que existe. Confirmar dos veces devuelve el estado actual en lugar de fallar.
+
+### Barrido periódico: expiración y reconciliación
+
+El worker ejecuta un barrido cada 30 segundos. Es un `Flux.interval` en lugar de `@Scheduled`: las ejecuciones nunca se solapan, ningún hilo espera I/O, y la suscripción se cancela limpiamente al apagar.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as worker (barrido)
+    participant D as DynamoDB
+    participant Q as SQS
+
+    W->>D: Query índice orderStatus-statusChangedAt<br/>AWAITING_CONFIRMATION, cambiado hace ≥ 10 min
+    loop cada reserva vencida (hasta 100, 8 en paralelo)
+        W->>W: vuelve a comprobar expiresAt (el índice es eventualmente consistente)
+        W->>D: TransactWriteItems (si version y estado no cambiaron)<br/>orden → EXPIRED, tickets → AVAILABLE<br/>reserved -= n, available += n
+    end
+    W->>D: Query PENDING y CONFIRMING cambiados hace entre 1 min y 1 h
+    loop cada orden atascada
+        W->>Q: reencola order-placed u order-confirmation
+    end
+```
+
+- **Nunca un `Scan`:** el coste crece con las órdenes que coinciden, no con el tamaño de la tabla.
+- **Reconciliación:** si el envío a SQS falló después de guardar la orden, la orden se queda en PENDING o CONFIRMING. El barrido la reencola, y como los consumidores son idempotentes un mensaje de más no tiene efecto. Pasada una hora deja de reencolarla, para no repetir eternamente un mensaje que siempre falla; ese caso queda para revisión.
+- **Varios workers a la vez:** si dos workers barren la misma orden, la escritura condicional deja pasar solo a uno; el otro recibe `ConcurrentUpdate` y sigue.
+
+### Carrera entre confirmar y expirar
+
+El cliente confirma en el último milisegundo mientras el barrido expira la misma reserva. La API y el worker corren en máquinas distintas con relojes que no coinciden, así que los dos creen tener razón.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as api (reloj 09:59.999)
+    participant D as DynamoDB
+    participant W as worker (reloj 10:00.000)
+
+    Note over A,W: los dos leyeron la orden AWAITING_CONFIRMATION, version 1
+    par
+        A->>D: orden → CONFIRMING<br/>si version = 1 y estado = AWAITING_CONFIRMATION
+    and
+        W->>D: orden → EXPIRED<br/>si version = 1 y estado = AWAITING_CONFIRMATION
+    end
+    D-->>A: OK (version 2)
+    D-->>W: ConditionalCheckFailed
+    Note over W: ConcurrentUpdate: otro ya cambió la orden, no hace nada
+```
+
+El reloj de cada proceso solo decide si *intenta* la transición; quien decide cuál gana es la condición sobre la versión. Un test lanza 40 confirmaciones y un barrido a la vez, con 1 ms de desfase entre relojes, y comprueba que cada orden termina exactamente en un estado y que el inventario cuadra.
+
+### Concurrencia: muchas compras, pocas entradas
+
+```mermaid
+flowchart LR
+    subgraph clientes[200 clientes a la vez]
+        c1[compra 1]
+        c2[compra 2]
+        cn[compra 200]
+    end
+    c1 & c2 & cn --> q[[order-placed<br/>cada mensaje llega 3 veces]]
+    q --> w1[worker] & w2[worker]
+    w1 & w2 -->|ADD available -1<br/>si available >= 1| ev[(evento<br/>50 entradas)]
+    ev -->|50 condiciones cumplidas| ok[50 AWAITING_CONFIRMATION]
+    ev -->|150 condiciones fallidas| ko[150 REJECTED]
+```
+
+No hay locks ni lecturas previas del inventario: DynamoDB evalúa `available >= 1` y descuenta en la misma operación atómica. Los duplicados no cuentan dos veces porque cada transición también exige que la orden siga en PENDING. El test `ConcurrentReservationTest` reproduce exactamente este escenario cinco veces seguidas.
 
 ### Idempotencia: la misma petición dos veces
 
@@ -215,7 +293,7 @@ Para detenerlo: `docker compose down`.
 ./gradlew validateStructure
 ```
 
-El informe de cobertura de cada módulo queda en `<módulo>/build/reports/jacocoHtml/index.html`.
+`./gradlew build` falla si la cobertura de líneas de cualquier módulo baja del 90% (se excluyen el arranque, la configuración de Spring y los DTO). El informe de cada módulo queda en `<módulo>/build/reports/jacocoHtml/index.html`.
 
 ### Configuración
 
@@ -229,6 +307,9 @@ La aplicación se configura por variables de entorno; los valores por defecto ap
 | `DYNAMODB_ENDPOINT` | `http://localhost:8000` |
 | `SQS_ENDPOINT` | `http://localhost:9324` |
 | `ORDER_QUEUE_URL` | `http://localhost:9324/000000000000/order-placed` |
+| `CONFIRMATION_QUEUE_URL` | `http://localhost:9324/000000000000/order-confirmation` |
+| `ADMIN_API_KEY` | vacío: endpoints de administración deshabilitados (docker-compose usa `local-admin-key`) |
+| `SWEEPER_INTERVAL` | `30s` |
 
 En local las credenciales son valores ficticios, porque los emuladores no las validan. En AWS no hay credenciales estáticas: se usan IAM task roles.
 
@@ -239,20 +320,22 @@ En local las credenciales son valores ficticios, porque los emuladores no las va
 | `POST` | `/events` | Crear un evento; responde `201` |
 | `GET` | `/events` | Listar eventos |
 | `GET` | `/events/{id}` | Consultar un evento con su inventario |
-| `GET` | `/events/{id}/availability` | Disponibilidad actual (también en tiempo real con SSE) *(pendiente)* |
-| `GET` | `/events/{id}/report` | Conteo por estado; las cortesías no cuentan como venta *(pendiente)* |
-| `POST` | `/events/{id}/complimentary` | Asignar cortesías (admin) *(pendiente)* |
+| `GET` | `/events/{id}/availability` | Disponibilidad actual: descuenta vendidas y reservadas temporalmente |
+| `GET` | `/events/{id}/availability/stream` | La misma disponibilidad en tiempo real (Server-Sent Events): un evento al conectar y otro en cada cambio |
+| `GET` | `/events/{id}/report` | Reporte operativo, contable y de inventario; las cortesías no cuentan como venta |
+| `POST` | `/events/{id}/complimentary` | Asignar cortesías; requiere `X-Admin-Key`; responde `201` |
 | `POST` | `/orders` | Crear una orden; requiere `X-Customer-Id` e `Idempotency-Key`; responde `202` |
 | `GET` | `/orders/{id}` | Estado de la orden (`orderStatus`) y de sus entradas (`ticketStatus`) |
-| `POST` | `/orders/{id}/confirm` | Confirmar la compra (pago simulado); responde `202` *(pendiente)* |
+| `POST` | `/orders/{id}/confirm` | Confirmar la compra; requiere `X-Customer-Id` del dueño; responde `202` y el pago corre en el worker |
 
-`X-Customer-Id` sustituye al usuario autenticado; con JWT saldría del token.
+`X-Customer-Id` sustituye al usuario autenticado; con JWT saldría del token. La pasarela de pago es simulada: aprueba todo salvo a los clientes cuyo id empieza por `declined-`, lo que permite probar el camino del rechazo.
 
 Los errores siguen el formato RFC 9457 (`application/problem+json`) y nunca exponen detalles internos:
 
 | Error | HTTP |
 |---|---|
 | Validación de entrada | 400 |
+| Clave de administrador ausente o incorrecta | 403 |
 | Recurso no encontrado | 404 |
 | Transición inválida, inventario insuficiente, modificación concurrente | 409 |
 | `Idempotency-Key` reutilizada con otro cuerpo | 422 |
@@ -276,11 +359,15 @@ Los ejemplos con `curl` y la colección de solicitudes se añaden al terminar to
 ### Mensajería
 - **Entrega al menos una vez.** El mensaje se borra solo después de procesarlo. Tras 5 intentos fallidos va a la DLQ.
 - **Consumidor idempotente.** Toda transición es condicional al estado actual de la orden, así que un mensaje duplicado no tiene efecto y no hace falta una tabla de deduplicación.
-- **Doble escritura (DynamoDB + SQS).** Si el envío a SQS falla después de guardar la orden, esta queda en PENDING y el proceso periódico la reencola. En producción se usaría el patrón outbox.
+- **Doble escritura (DynamoDB + SQS).** Si el envío a SQS falla después de guardar la orden, esta queda en PENDING (o CONFIRMING) y el barrido periódico la reencola. Verificado tumbando el emulador de SQS: la orden se guarda, la API responde `202` y el worker la reserva cuando SQS vuelve. En producción se usaría el patrón outbox.
+- **Una cola por paso.** `order-placed` y `order-confirmation` tienen cada una su DLQ y su consumidor, así que un problema en los cobros no frena las reservas.
+- **El consumidor sobrevive a caídas de SQS.** El listener del scaffold dejaba de consumir para siempre tras un fallo de recepción (`repeat()` solo resuscribe al completar, no al fallar). Ahora reintenta con backoff exponencial de 1 s a 30 s; verificado tumbando y levantando el emulador sin reiniciar el worker.
 
 ### Expiración de reservas
-- Un barrido periódico consulta un índice secundario (`orderStatus` + `statusChangedAt`), nunca hace un `Scan`.
+- El barrido periódico consulta un índice secundario (`orderStatus` + `statusChangedAt`), nunca hace un `Scan`.
 - No depende del TTL de DynamoDB, que puede tardar horas en borrar un elemento.
+- La confirmación también comprueba `expiresAt`: si el barrido aún no ha pasado, una reserva vencida responde `410 Gone`; si ya pasó, la orden está en EXPIRED y responde `409`. Verificado en docker-compose: la reserva expiró 25 s después de su límite, dentro del intervalo del barrido.
+- La disponibilidad se libera en el siguiente barrido: el desfase máximo es el intervalo del barrido (30 s por defecto).
 
 ### Modelo de datos
 Se usan varias tablas (`ticketing-events`, `-orders`, `-tickets`, `-audit` e `-idempotency`) en lugar de una sola: es más fácil de explicar y mantener, y `TransactWriteItems` funciona igual entre tablas. La auditoría es de solo inserción y se escribe en la misma transacción que el cambio de estado, así que ninguna transición queda sin registrar.
@@ -296,9 +383,13 @@ WebFlux ya es no bloqueante: unos pocos hilos atienden miles de peticiones concu
 ### Emuladores locales en lugar de LocalStack
 Desde la versión 2026.03.0, la imagen de LocalStack exige un token de autenticación. Para que `docker compose up` funcione en cualquier máquina sin cuentas ni secretos, se usan DynamoDB Local y ElasticMQ, compatible con la API de SQS (colas, DLQ, visibility timeout y long polling).
 
-## Seguridad *(parcialmente pendiente)*
+## Seguridad *(rate limiting pendiente)*
 - Sin credenciales en el repositorio; la configuración entra por variables de entorno.
 - El contenedor se ejecuta con un usuario sin privilegios.
+- Los endpoints de administración exigen `X-Admin-Key`, leída solo de la variable de entorno `ADMIN_API_KEY` y comparada en tiempo constante. Sin clave configurada, quedan deshabilitados. El valor de docker-compose es solo para desarrollo local. En producción se sustituiría por un rol emitido por un servidor de autorización.
+- Un cliente no puede consultar ni confirmar órdenes ajenas: la confirmación de una orden de otro cliente responde `404`, igual que si no existiera.
+- Los streams de disponibilidad se cierran a los 10 minutos para que conexiones inactivas no acaparen recursos.
+- Los 5xx nunca exponen detalles internos.
 - Idempotencia frente a reintentos maliciosos o del cliente: la misma `Idempotency-Key` con un cuerpo distinto responde `422`. Las claves se guardan por cliente, así que nadie puede colisionar con las de otro ni sondearlas.
 - Validación de entrada y máximo de 10 entradas por orden.
 - Rate limiting en la API para limitar el abuso de recursos.
