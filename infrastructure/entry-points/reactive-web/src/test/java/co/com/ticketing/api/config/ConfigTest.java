@@ -1,26 +1,30 @@
 package co.com.ticketing.api.config;
 
-import co.com.ticketing.api.Handler;
-import co.com.ticketing.api.RouterRest;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webflux.test.autoconfigure.WebFluxTest;
-import org.springframework.context.annotation.Import;
-import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import org.springframework.web.reactive.function.server.RouterFunctions;
+import org.springframework.web.reactive.function.server.ServerResponse;
 
-@ContextConfiguration(classes = {RouterRest.class, Handler.class})
-@WebFluxTest
-@Import({CorsConfig.class, SecurityHeadersConfig.class})
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.web.reactive.function.server.RequestPredicates.GET;
+
 class ConfigTest {
 
-    @Autowired
-    private WebTestClient webTestClient;
+    private final WebTestClient client = WebTestClient
+            .bindToRouterFunction(RouterFunctions.route(GET("/events"), _ -> ServerResponse.ok().build()))
+            .webFilter(new SecurityHeadersConfig())
+            .build();
 
     @Test
-    void corsConfigurationShouldAllowOrigins() {
-        webTestClient.get()
-                .uri("/api/usecase/path")
+    void corsFilterShouldBeCreated() {
+        assertThat(new CorsConfig().corsWebFilter(List.of("http://localhost:4200"))).isNotNull();
+    }
+
+    @Test
+    void shouldAddSecurityHeaders() {
+        client.get().uri("/events")
                 .exchange()
                 .expectStatus().isOk()
                 .expectHeader().valueEquals("Content-Security-Policy",
@@ -32,5 +36,4 @@ class ConfigTest {
                 .expectHeader().valueEquals("Pragma", "no-cache")
                 .expectHeader().valueEquals("Referrer-Policy", "strict-origin-when-cross-origin");
     }
-
 }

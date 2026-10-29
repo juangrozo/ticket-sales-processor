@@ -14,7 +14,7 @@ import java.util.List;
 public class CorsConfig {
 
     @Bean
-    CorsWebFilter corsWebFilter(@Value("${cors.allowed-origins}") List<String> origins) {
+    public CorsWebFilter corsWebFilter(@Value("${cors.allowed-origins}") List<String> origins) {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowCredentials(Boolean.TRUE);
         config.setAllowedOrigins(origins);
