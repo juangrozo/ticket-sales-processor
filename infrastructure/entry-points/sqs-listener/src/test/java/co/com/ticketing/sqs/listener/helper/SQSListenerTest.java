@@ -1,6 +1,5 @@
 package co.com.ticketing.sqs.listener.helper;
 
-import co.com.ticketing.sqs.listener.SQSProcessor;
 import co.com.ticketing.sqs.listener.config.SQSProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,7 +56,7 @@ class SQSListenerTest {
         var sqsListener = SQSListener.builder()
                 .client(asyncClient)
                 .properties(sqsProperties)
-                .processor(new SQSProcessor())
+                .processor(message -> reactor.core.publisher.Mono.empty())
                 .operation("operation")
                 .build();
 

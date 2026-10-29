@@ -1,6 +1,7 @@
 package co.com.ticketing.sqs.listener.config;
 
 import co.com.ticketing.sqs.listener.helper.SQSListener;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import reactor.core.publisher.Mono;
@@ -22,7 +23,9 @@ import java.util.function.Function;
 @Configuration
 public class SQSConfig {
 
+    /** Consumes the queue only in the {@code worker} role (or {@code all}). */
     @Bean
+    @ConditionalOnExpression("'${app.role:all}' matches 'worker|all'")
     public SQSListener sqsListener(SqsAsyncClient client, SQSProperties properties, Function<Message, Mono<Void>> fn) {
         return SQSListener.builder()
                 .client(client)
@@ -54,7 +57,7 @@ public class SQSConfig {
     }
 
     protected URI resolveEndpoint(SQSProperties properties) {
-        if (properties.endpoint() != null) {
+        if (properties.endpoint() != null && !properties.endpoint().isBlank()) {
             return URI.create(properties.endpoint());
         }
         return null;
