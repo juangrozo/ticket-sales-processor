@@ -53,7 +53,8 @@ public class OrderHandler {
     }
 
     public Mono<ServerResponse> get(ServerRequest request) {
-        return getOrderUseCase.get(request.pathVariable("orderId"))
+        return Mono.fromCallable(() -> customerId(request))
+                .flatMap(customerId -> getOrderUseCase.get(request.pathVariable("orderId"), customerId))
                 .flatMap(details -> ServerResponse.ok().bodyValue(OrderResponse.from(details)));
     }
 

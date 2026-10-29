@@ -18,6 +18,8 @@ import reactor.test.StepVerifier;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -39,7 +41,7 @@ class GetOrderUseCaseTest {
         when(orderRepository.findById("o-1")).thenReturn(Mono.just(ORDER));
         when(ticketRepository.findByOrderId("o-1")).thenReturn(Flux.just(Ticket.reserved("t-1", "o-1", "e-1", NOW)));
 
-        StepVerifier.create(useCase.get("o-1"))
+        StepVerifier.create(useCase.get("o-1", "c-1"))
                 .assertNext(details -> {
                     assertThat(details.order()).isEqualTo(ORDER);
                     assertThat(details.ticketStatus()).isEqualTo(TicketStatus.RESERVED);
@@ -51,6 +53,15 @@ class GetOrderUseCaseTest {
     void shouldFailWhenOrderDoesNotExist() {
         when(orderRepository.findById("o-1")).thenReturn(Mono.empty());
 
-        StepVerifier.create(useCase.get("o-1")).expectError(ResourceNotFoundException.class).verify();
+        StepVerifier.create(useCase.get("o-1", "c-1")).expectError(ResourceNotFoundException.class).verify();
+    }
+
+    @Test
+    void anotherCustomersOrderShouldLookMissing() {
+        when(orderRepository.findById("o-1")).thenReturn(Mono.just(ORDER));
+
+        StepVerifier.create(useCase.get("o-1", "intruder")).expectError(ResourceNotFoundException.class).verify();
+
+        verify(ticketRepository, never()).findByOrderId("o-1");
     }
 }

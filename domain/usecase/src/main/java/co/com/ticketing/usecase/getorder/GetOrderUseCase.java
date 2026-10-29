@@ -13,8 +13,13 @@ public class GetOrderUseCase {
     private final OrderRepository orderRepository;
     private final TicketRepository ticketRepository;
 
-    public Mono<OrderDetails> get(String orderId) {
+    /**
+     * Only the customer who placed the order can read it. Another customer's order answers like a
+     * missing one, so ids that leak (logs, shared links) disclose nothing.
+     */
+    public Mono<OrderDetails> get(String orderId, String customerId) {
         return orderRepository.findById(orderId)
+                .filter(order -> order.customerId().equals(customerId))
                 .switchIfEmpty(Mono.error(() -> new ResourceNotFoundException("Order", orderId)))
                 .flatMap(order -> ticketRepository.findByOrderId(orderId)
                         .collectList()

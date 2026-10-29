@@ -232,9 +232,9 @@ class RouterRestTest {
         Order reserved = ORDER.apply(new Reserve(NOW));
         OrderDetails details = new OrderDetails(reserved, List.of(
                 Ticket.reserved("t-1", "o-1", "e-1", NOW), Ticket.reserved("t-2", "o-1", "e-1", NOW)));
-        when(getOrderUseCase.get("o-1")).thenReturn(Mono.just(details));
+        when(getOrderUseCase.get("o-1", "c-1")).thenReturn(Mono.just(details));
 
-        client.get().uri("/orders/o-1").exchange()
+        client.get().uri("/orders/o-1").header(OrderHandler.CUSTOMER_HEADER, "c-1").exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.orderStatus").isEqualTo("AWAITING_CONFIRMATION")
@@ -379,10 +379,17 @@ class RouterRestTest {
     }
 
     @Test
-    void unexpectedErrorShouldNotLeakDetails() {
-        when(getOrderUseCase.get("o-1")).thenReturn(Mono.error(new IllegalStateException("table orders unreachable")));
+    void readingAnOrderShouldRequireTheCustomer() {
+        client.get().uri("/orders/o-1").exchange().expectStatus().isBadRequest();
 
-        client.get().uri("/orders/o-1").exchange()
+        verify(getOrderUseCase, never()).get(anyString(), anyString());
+    }
+
+    @Test
+    void unexpectedErrorShouldNotLeakDetails() {
+        when(getOrderUseCase.get("o-1", "c-1")).thenReturn(Mono.error(new IllegalStateException("table orders unreachable")));
+
+        client.get().uri("/orders/o-1").header(OrderHandler.CUSTOMER_HEADER, "c-1").exchange()
                 .expectStatus().is5xxServerError()
                 .expectBody().jsonPath("$.detail").isEqualTo("Unexpected error");
     }

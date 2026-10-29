@@ -109,8 +109,9 @@ class ConcurrentPurchaseIntegrationTest {
                 .block();
     }
 
-    private String status(String orderId) {
+    private String status(String orderId, String customerId) {
         return (String) client().get().uri("/orders/{id}", orderId)
+                .header("X-Customer-Id", customerId)
                 .retrieve()
                 .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() { })
                 .block()
@@ -148,7 +149,8 @@ class ConcurrentPurchaseIntegrationTest {
         Map<String, Long> byStatus = Map.of();
         Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
         while (Instant.now().isBefore(deadline)) {
-            byStatus = orderIds.stream().collect(Collectors.groupingBy(this::status, Collectors.counting()));
+            byStatus = orderByCustomer.entrySet().stream().collect(Collectors.groupingBy(
+                    entry -> status(entry.getValue(), "customer-" + entry.getKey()), Collectors.counting()));
             if (!byStatus.containsKey("PENDING")) {
                 break;
             }
