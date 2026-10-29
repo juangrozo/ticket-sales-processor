@@ -5,20 +5,17 @@ spring:
     name: "TicketSalesProcessor"
   devtools:
     add-properties: false
-  h2:
-    console:
-      enabled: true
-      path: "/h2"
   profiles:
-    include: null
+    default: "local"
 aws:
+  region: "${AWS_REGION:us-east-1}"
   dynamodb:
-    endpoint: "http://localhost:8000"
+    endpoint: "${DYNAMODB_ENDPOINT:http://localhost:8000}"
 adapter:
   sqs:
-    region: "us-east-1"
-    queueUrl: "http://localhost:4566/000000000000/sample"
-    endpoint: "http://localhost:4566 # For localstack only"
+    region: "${AWS_REGION:us-east-1}"
+    queueUrl: "${ORDER_QUEUE_URL:http://localhost:9324/000000000000/order-placed}"
+    endpoint: "${SQS_ENDPOINT:http://localhost:9324}"
 management:
   endpoints:
     web:
@@ -32,10 +29,10 @@ cors:
   allowed-origins: "http://localhost:4200,http://localhost:8080"
 entrypoint:
   sqs:
-    region: "us-east-1"
-    endpoint: "http://localhost:4566"
-    queueUrl: "http://localhost:4566/000000000000/sample"
+    region: "${AWS_REGION:us-east-1}"
+    endpoint: "${SQS_ENDPOINT:http://localhost:9324}"
+    queueUrl: "${ORDER_QUEUE_URL:http://localhost:9324/000000000000/order-placed}"
     waitTimeSeconds: 20
     maxNumberOfMessages: 10
-    visibilityTimeoutSeconds: 10
+    visibilityTimeoutSeconds: 30
     numberOfThreads: 1
