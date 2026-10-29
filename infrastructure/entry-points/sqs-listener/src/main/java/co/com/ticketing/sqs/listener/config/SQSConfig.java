@@ -1,5 +1,7 @@
 package co.com.ticketing.sqs.listener.config;
 
+import co.com.ticketing.sqs.listener.ConfirmationRequestedProcessor;
+import co.com.ticketing.sqs.listener.OrderPlacedProcessor;
 import co.com.ticketing.sqs.listener.helper.SQSListener;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
@@ -23,14 +25,28 @@ import java.util.function.Function;
 @Configuration
 public class SQSConfig {
 
-    /** Consumes the queue only in the {@code worker} role (or {@code all}). */
+    /** Consumes order-placed only in the {@code worker} role (or {@code all}). */
     @Bean
     @ConditionalOnExpression("'${app.role:all}' matches 'worker|all'")
-    public SQSListener sqsListener(SqsAsyncClient client, SQSProperties properties, Function<Message, Mono<Void>> fn) {
+    public SQSListener orderPlacedListener(SqsAsyncClient client, SQSProperties properties,
+                                           OrderPlacedProcessor processor) {
+        return listener(client, properties, processor);
+    }
+
+    /** Consumes order-confirmation only in the {@code worker} role (or {@code all}). */
+    @Bean
+    @ConditionalOnExpression("'${app.role:all}' matches 'worker|all'")
+    public SQSListener confirmationListener(SqsAsyncClient client, SQSProperties properties,
+                                            ConfirmationRequestedProcessor processor) {
+        return listener(client, properties.forQueue(properties.confirmationQueueUrl()), processor);
+    }
+
+    private static SQSListener listener(SqsAsyncClient client, SQSProperties properties,
+                                        Function<Message, Mono<Void>> processor) {
         return SQSListener.builder()
                 .client(client)
                 .properties(properties)
-                .processor(fn)
+                .processor(processor)
                 .build()
                 .start();
     }

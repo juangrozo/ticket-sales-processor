@@ -10,5 +10,12 @@ public record SQSProperties(
         int waitTimeSeconds,
         int visibilityTimeoutSeconds,
         int maxNumberOfMessages,
-        int numberOfThreads) {
+        int numberOfThreads,
+        String confirmationQueueUrl) {
+
+    /** Same polling settings, another queue. */
+    public SQSProperties forQueue(String otherQueueUrl) {
+        return new SQSProperties(region, endpoint, otherQueueUrl, waitTimeSeconds, visibilityTimeoutSeconds,
+                maxNumberOfMessages, numberOfThreads, confirmationQueueUrl);
+    }
 }

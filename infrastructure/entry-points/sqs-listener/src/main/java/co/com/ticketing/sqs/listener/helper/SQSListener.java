@@ -7,16 +7,21 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
+import reactor.util.retry.Retry;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
 import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 
+import java.time.Duration;
 import java.util.function.Function;
 
 @Log4j2
 @Builder
 public class SQSListener {
+    static final Duration RETRY_MIN_BACKOFF = Duration.ofSeconds(1);
+    static final Duration RETRY_MAX_BACKOFF = Duration.ofSeconds(30);
+
     private final SqsAsyncClient client;
     private final SQSProperties properties;
     private final Function<Message, Mono<Void>> processor;
@@ -33,9 +38,15 @@ public class SQSListener {
         return this;
     }
 
+    /**
+     * {@code repeat()} only resubscribes after completion. Without the retry, one failed receive
+     * (for example SQS briefly unreachable) would end the loop and the worker would stop consuming
+     * until restarted.
+     */
     private Flux<Void> listenRetryRepeat() {
         return listen()
-                .doOnError(e -> log.error("Error listening sqs queue", e))
+                .doOnError(e -> log.error("Error listening sqs queue, retrying", e))
+                .retryWhen(Retry.backoff(Long.MAX_VALUE, RETRY_MIN_BACKOFF).maxBackoff(RETRY_MAX_BACKOFF))
                 .repeat();
     }
 

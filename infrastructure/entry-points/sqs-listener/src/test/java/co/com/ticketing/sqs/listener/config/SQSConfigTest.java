@@ -1,15 +1,18 @@
 package co.com.ticketing.sqs.listener.config;
 
+import co.com.ticketing.sqs.listener.ConfirmationRequestedProcessor;
+import co.com.ticketing.sqs.listener.OrderPlacedProcessor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import reactor.core.publisher.Mono;
 import software.amazon.awssdk.metrics.LoggingMetricPublisher;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class SQSConfigTest {
@@ -35,7 +38,11 @@ class SQSConfigTest {
 
     @Test
     void configSQSListenerIsNotNull() {
-        assertThat(sqsConfig.sqsListener(sqsAsyncClient, sqsProperties, message -> Mono.empty())).isNotNull();
+        when(sqsProperties.forQueue(any())).thenReturn(sqsProperties);
+        assertThat(sqsConfig.orderPlacedListener(sqsAsyncClient, sqsProperties,
+                mock(OrderPlacedProcessor.class))).isNotNull();
+        assertThat(sqsConfig.confirmationListener(sqsAsyncClient, sqsProperties,
+                mock(ConfirmationRequestedProcessor.class))).isNotNull();
     }
 
     @Test
