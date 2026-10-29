@@ -24,4 +24,12 @@ subprojects {
     // Remove once it has been updated in Spring Boot
     ext['jackson-2-bom.version'] = "2.22.4"
     ext['jackson-bom.version'] = "3.2.4"
+
+    // The scaffold conventions disable failOnNoDiscoveredTests but never select JUnit Platform,
+    // so Gradle falls back to JUnit 4 and silently runs zero JUnit 5 tests.
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        // Required by BlockHound to instrument the JDK at runtime
+        jvmArgs '-XX:+AllowRedefinitionToAddDeleteMethods', '-XX:+EnableDynamicAgentLoading'
+    }
 }
