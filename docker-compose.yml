@@ -30,13 +30,16 @@ services:
     volumes:
       - ./deployment/local/elasticmq.conf:/opt/elasticmq.conf:ro
 
-  app:
-    build:
+  # Same image, two roles: the API only stores and queues orders; the worker consumes the queue.
+  api:
+    build: &app-build
       context: .
       dockerfile: deployment/Dockerfile
+    image: ticket-sales-processor:local
     ports:
       - "8080:8080"
-    environment:
+    environment: &app-env
+      APP_ROLE: api
       SPRING_PROFILES_ACTIVE: local
       AWS_REGION: us-east-1
       # Dummy values: the local emulators do not validate credentials.
@@ -45,14 +48,25 @@ services:
       DYNAMODB_ENDPOINT: http://dynamodb:8000
       SQS_ENDPOINT: http://elasticmq:9324
       ORDER_QUEUE_URL: http://elasticmq:9324/000000000000/order-placed
-    depends_on:
+    depends_on: &app-deps
       dynamodb-init:
         condition: service_completed_successfully
       elasticmq:
         condition: service_started
-    healthcheck:
+    healthcheck: &app-health
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 20s
+
+  worker:
+    image: ticket-sales-processor:local
+    environment:
+      <<: *app-env
+      APP_ROLE: worker
+    depends_on:
+      <<: *app-deps
+      api:
+        condition: service_started
+    healthcheck: *app-health

@@ -7,10 +7,19 @@ spring:
     add-properties: false
   profiles:
     default: "local"
+app:
+  # api: HTTP only; worker: queue consumer and scheduled jobs only; all: both (local development and tests)
+  role: "${APP_ROLE:all}"
 aws:
   region: "${AWS_REGION:us-east-1}"
   dynamodb:
     endpoint: "${DYNAMODB_ENDPOINT:http://localhost:8000}"
+    tables:
+      events: "${DYNAMODB_TABLE_PREFIX:ticketing}-events"
+      orders: "${DYNAMODB_TABLE_PREFIX:ticketing}-orders"
+      tickets: "${DYNAMODB_TABLE_PREFIX:ticketing}-tickets"
+      audit: "${DYNAMODB_TABLE_PREFIX:ticketing}-audit"
+      idempotency: "${DYNAMODB_TABLE_PREFIX:ticketing}-idempotency"
 adapter:
   sqs:
     region: "${AWS_REGION:us-east-1}"
