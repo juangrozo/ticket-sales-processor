@@ -10,6 +10,8 @@ import reactor.blockhound.integration.BlockHoundIntegration;
  *   does not block in practice.</li>
  *   <li>Jackson builds each deserializer once, under a lock, and caches it. Under a burst of first
  *   requests the threads briefly wait for that CPU-only warm-up; it never waits for I/O.</li>
+ *   <li>The AWS SDK signs every request with a pooled {@code MessageDigest} guarded by a lock. Under
+ *   many concurrent calls threads briefly wait for a digest; again CPU only.</li>
  * </ul>
  */
 public class AllowedBlockingCallsIntegration implements BlockHoundIntegration {
@@ -18,5 +20,6 @@ public class AllowedBlockingCallsIntegration implements BlockHoundIntegration {
     public void applyTo(BlockHound.Builder builder) {
         builder.allowBlockingCallsInside("java.util.UUID", "randomUUID");
         builder.allowBlockingCallsInside("tools.jackson.databind.deser.DeserializerCache", "_createAndCacheValueDeserializer");
+        builder.allowBlockingCallsInside("software.amazon.awssdk.checksums.internal.DigestAlgorithm", "getDigest");
     }
 }
