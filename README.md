@@ -1,7 +1,5 @@
 # Ticket Sales Processor
 
-> **Borrador en construcción.** Las secciones marcadas como *(pendiente)* describen lo que falta por implementar.
-
 Backend reactivo y orientado a eventos para la venta de entradas a eventos (conciertos, teatro, deportes) bajo picos de demanda. Resuelve los tres problemas del sistema actual:
 
 | Problema | Cómo se resuelve |
@@ -9,6 +7,8 @@ Backend reactivo y orientado a eventos para la venta de entradas a eventos (conc
 | Sobreventa (asientos vendidos a varias personas) | Escrituras condicionales atómicas en DynamoDB: el inventario solo se descuenta si `available >= quantity`. |
 | Compras duplicadas | `Idempotency-Key` en la API y transiciones de estado condicionales en el consumidor (un mensaje repetido no tiene efecto). |
 | Timeouts bajo alta concurrencia | La API solo registra la orden, la encola y responde `202 Accepted`; el trabajo pesado lo hace un consumidor asíncrono de SQS. Todo el stack es no bloqueante (WebFlux + AWS SDK v2 asíncrono). |
+
+**Contenido:** [Stack](#stack) · [Arquitectura](#arquitectura) · [Modelo de estados](#modelo-de-estados) · [Flujo de compra](#flujo-de-compra) · [Interacciones entre componentes](#interacciones-entre-componentes) · [Cómo ejecutarlo](#cómo-ejecutarlo) · [Ejemplos de uso](#ejemplos-de-uso) · [Endpoints](#endpoints) · [Decisiones arquitectónicas](#decisiones-arquitectónicas) · [Seguridad](#seguridad) · [Despliegue en AWS](#despliegue-en-aws) · [Limitaciones y mejoras](#limitaciones-y-mejoras)
 
 ## Stack
 
@@ -260,6 +260,25 @@ flowchart TD
 
 Que un mensaje acabe en la DLQ no pierde la orden: sigue guardada en PENDING y el proceso periódico de reconciliación la puede reencolar.
 
+## Interacciones entre componentes
+
+Cada flecha de los diagramas, con su garantía y lo que pasa cuando falla.
+
+| Origen → destino | Canal | Tipo | Garantía | Si falla |
+|---|---|---|---|---|
+| Cliente → api | HTTP `POST /orders` | Síncrono, responde `202` en milisegundos | Con la misma `Idempotency-Key`, reintentar es seguro: devuelve la misma orden | El cliente reintenta con la misma clave; nunca se crea una segunda orden |
+| api → DynamoDB | `TransactWriteItems`: clave de idempotencia + orden PENDING + auditoría | Síncrono | Todo o nada; la clave solo se registra una vez | Responde 5xx y no queda nada guardado; el cliente reintenta |
+| api → SQS `order-placed` | `SendMessage` (2 reintentos con backoff) | Asíncrono | Al menos una vez, una vez enviado | La orden ya está guardada en PENDING y responde `202` igual; el barrido la reencola pasado 1 minuto |
+| SQS → worker (reserva) | Long polling, el mensaje se borra solo tras procesarlo | Asíncrono | Al menos una vez: puede llegar repetido | Un duplicado no tiene efecto (la orden ya no está PENDING). Un error devuelve el mensaje a la cola tras 30 s; tras 5 intentos va a la DLQ y salta una alarma |
+| worker → DynamoDB | `TransactWriteItems` condicional: orden + `ADD` en el inventario + tickets + auditoría | Síncrono dentro del worker | Atómico; nunca descuenta por debajo de cero | Conflicto transitorio: 3 reintentos con jitter. Sin stock: la orden pasa a REJECTED. Otra instancia ganó: no hace nada |
+| Cliente → api | HTTP `POST /orders/{id}/confirm` | Síncrono, responde `202` | Solo el dueño; repetirla devuelve el estado actual | Reserva vencida: `410`. Otro proceso cambió la orden: `409` |
+| api → SQS `order-confirmation` | `SendMessage` | Asíncrono | Al menos una vez | La orden queda en CONFIRMING; el barrido la reencola |
+| SQS → worker (cobro) → pasarela | Long polling + llamada a la pasarela | Asíncrono | La pasarela recibe el `orderId` como clave de idempotencia, así que un mensaje repetido no cobra dos veces | Un error de la pasarela devuelve el mensaje a la cola; tras 5 intentos, a la DLQ |
+| worker (barrido) → DynamoDB | `Query` al índice `orderStatus-statusChangedAt` + transacciones condicionales | Periódico, cada 30 s | Nunca un `Scan`; varios workers a la vez no aplican nada dos veces | El índice es eventualmente consistente: se vuelve a comprobar `expiresAt` antes de escribir. Si un barrido falla, el siguiente continúa |
+| worker (barrido) → SQS | `SendMessage` de órdenes atascadas entre 1 min y 1 h | Periódico | Los consumidores idempotentes absorben los reenvíos | Pasada una hora la orden deja de reencolarse y queda para revisión |
+| Cliente → api | SSE `GET /events/{id}/availability/stream` | Streaming | Un evento al conectar y uno por cada cambio | El stream se cierra a los 10 minutos; el cliente se reconecta |
+| Admin → api | HTTP `POST /events/{id}/complimentary` con `X-Admin-Key` | Síncrono | Atómico: orden COMPLIMENTARY + tickets + inventario | Clave inválida: `403`. Sin stock: `409` |
+
 ## Cómo ejecutarlo
 
 ### Requisitos
@@ -315,6 +334,65 @@ La aplicación se configura por variables de entorno; los valores por defecto ap
 
 En local las credenciales son valores ficticios, porque los emuladores no las validan. En AWS no hay credenciales estáticas: se usan IAM task roles.
 
+## Ejemplos de uso
+
+Con el stack levantado (`docker compose up -d --build`). Los ejemplos usan `jq` para extraer ids.
+
+```bash
+API=http://localhost:8080
+RUN=$(date +%s)   # idempotency keys must be unique per purchase, so each run uses new ones
+
+# 1. Crear un evento con 10 entradas
+EVENT_ID=$(curl -s -X POST $API/events -H 'Content-Type: application/json' \
+  -d '{"name":"Rock Fest","venue":"Movistar Arena","startsAt":"2026-12-15T20:00:00Z","capacity":10}' | jq -r .eventId)
+
+# 2. Comprar 2 entradas: responde 202 al instante con la orden en PENDING
+ORDER_ID=$(curl -s -X POST $API/orders -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: ana' -H "Idempotency-Key: compra-$RUN" \
+  -d "{\"eventId\":\"$EVENT_ID\",\"quantity\":2}" | jq -r .orderId)
+
+# 3. Repetir la misma petición (doble clic, timeout): devuelve la misma orden, no crea otra
+curl -s -X POST $API/orders -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: ana' -H "Idempotency-Key: compra-$RUN" \
+  -d "{\"eventId\":\"$EVENT_ID\",\"quantity\":2}" | jq -r .orderId
+
+# 4. Consultar la orden: el worker ya reservó (AWAITING_CONFIRMATION / RESERVED, con expiresAt)
+sleep 1
+curl -s $API/orders/$ORDER_ID -H 'X-Customer-Id: ana' | jq '{orderStatus, ticketStatus, expiresAt}'
+
+# 5. Disponibilidad: descuenta las reservadas
+curl -s $API/events/$EVENT_ID/availability | jq
+
+# 6. Confirmar la compra; el pago corre en el worker y las entradas quedan SOLD
+curl -s -X POST $API/orders/$ORDER_ID/confirm -H 'X-Customer-Id: ana' | jq .orderStatus
+sleep 1
+curl -s $API/orders/$ORDER_ID -H 'X-Customer-Id: ana' | jq '{orderStatus, ticketStatus}'
+
+# 7. Pago rechazado: los clientes "declined-*" prueban ese camino; las entradas vuelven a AVAILABLE
+D_ID=$(curl -s -X POST $API/orders -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: declined-bob' -H "Idempotency-Key: rechazo-$RUN" \
+  -d "{\"eventId\":\"$EVENT_ID\",\"quantity\":1}" | jq -r .orderId)
+sleep 1; curl -s -X POST $API/orders/$D_ID/confirm -H 'X-Customer-Id: declined-bob' > /dev/null
+sleep 1; curl -s $API/orders/$D_ID -H 'X-Customer-Id: declined-bob' | jq '{orderStatus, failureReason}'
+
+# 8. Cortesías (admin): finales, pero no cuentan como venta
+curl -s -X POST $API/events/$EVENT_ID/complimentary -H 'Content-Type: application/json' \
+  -H 'X-Admin-Key: local-admin-key' -d '{"recipientId":"vip-1","quantity":2}' | jq '{type, orderStatus}'
+
+# 9. Reporte operativo, contable y de inventario
+curl -s $API/events/$EVENT_ID/report | jq
+
+# 10. Disponibilidad en tiempo real (Ctrl+C para salir)
+curl -N $API/events/$EVENT_ID/availability/stream
+```
+
+La colección de Postman [`postman/ticket-sales-processor.postman_collection.json`](postman/ticket-sales-processor.postman_collection.json) recorre estos flujos con aserciones, incluidos los errores. Se puede ejecutar en Postman o sin instalar nada:
+
+```bash
+docker run --rm --network host -v "$PWD/postman:/etc/newman" postman/newman:6.1.3-alpine \
+  run ticket-sales-processor.postman_collection.json
+```
+
 ## Endpoints
 
 | Método | Ruta | Descripción |
@@ -342,9 +420,9 @@ Los errores siguen el formato RFC 9457 (`application/problem+json`) y nunca expo
 | Transición inválida, inventario insuficiente, modificación concurrente | 409 |
 | `Idempotency-Key` reutilizada con otro cuerpo | 422 |
 | Reserva expirada | 410 |
+| Demasiadas peticiones (con `Retry-After`) | 429 |
 | Error inesperado | 500 |
 
-Los ejemplos con `curl` y la colección de solicitudes se añaden al terminar todos los endpoints.
 
 ## Decisiones arquitectónicas
 
@@ -467,8 +545,22 @@ flowchart TB
 - `default_tags` en el provider: Project, Environment, Stack, Owner, CostCenter y ManagedBy en todos los recursos sin repetirlos. El presupuesto filtra por el tag `Stack`.
 - Las versiones de Terraform y del provider están fijadas, con su lock file en el repositorio.
 
-## Limitaciones y mejoras *(pendiente)*
-- Partición caliente en eventos muy populares; se mitigaría con contadores fragmentados (sharded counters).
-- Patrón outbox para eliminar la doble escritura.
-- Autenticación con JWT.
-- Trazas distribuidas (OpenTelemetry o X-Ray) a través de SQS.
+## Limitaciones y mejoras
+
+Lo que esta solución no resuelve todavía, y qué cambiaría en un entorno productivo real.
+
+| Limitación | Impacto | Qué haría en producción |
+|---|---|---|
+| **Partición caliente.** Todo el inventario de un evento vive en un solo ítem. | DynamoDB admite unas 1.000 escrituras por segundo por ítem: es el techo de reservas por segundo de un mismo evento. | Contadores fragmentados: repartir el stock en N ítems y reservar en uno al azar. Se gana escala a cambio de que la disponibilidad sume N lecturas y de que una reserva pueda fallar en un fragmento vacío aunque quede stock en otro. |
+| **Doble escritura** DynamoDB + SQS en la API. | Si SQS falla, la orden espera hasta un minuto a que el barrido la reencole. | Patrón outbox con DynamoDB Streams y EventBridge Pipes hacia SQS: el mensaje sale del mismo registro que la orden y desaparece la reconciliación. |
+| **Autenticación.** El cliente se identifica con `X-Customer-Id` y el admin con una clave compartida. | La cabecera la declara el propio cliente. La regla de autorización ya existe (cada cliente solo ve y confirma lo suyo), pero falta autenticar. | JWT (por ejemplo Cognito): el `customerId` sale del token y el admin es un rol. La regla de autorización no cambia. |
+| **El SSE consulta DynamoDB cada 2 s por suscriptor.** | Coste y lecturas que crecen con el número de personas mirando un evento. | DynamoDB Streams publica cada cambio de inventario en un canal (ElastiCache pub/sub o API Gateway WebSockets) y los streams solo reenvían. |
+| **La expiración tarda hasta un intervalo de barrido** (30 s). | Entradas vencidas no se pueden comprar durante unos segundos. | Una tarea programada por reserva (EventBridge Scheduler o un mensaje SQS con `DelaySeconds=600`) que la expire justo a tiempo; el barrido queda como red de seguridad. |
+| **Rate limiting por instancia.** | Con N tareas, un cliente puede hacer N veces el límite. | Límite distribuido (ElastiCache) o planes de uso de API Gateway; el WAF ya limita por IP de forma global. |
+| **Pago simulado.** | No hay webhooks, reembolsos ni pagos que tardan. | Pasarela real con `orderId` como clave de idempotencia, confirmación por webhook y una saga con compensación si el pago llega después de expirar la reserva. |
+| **Se venden cantidades, no asientos.** | No hay selección de asiento. | Un ítem por asiento con escritura condicional por asiento; el contador quedaría como vista agregada. |
+| **Observabilidad básica.** | Hay logs y alarmas, pero no trazas ni métricas de negocio. | OpenTelemetry o X-Ray con el `orderId` propagado como atributo de mensaje SQS, logs JSON y métricas de reservas, rechazos y expiraciones. |
+| **Sin pipeline de CI/CD.** | Build, tests y validaciones se ejecutan a mano. | GitHub Actions: build y tests, `tflint` y checkov, imagen ARM64 a ECR con el SHA como tag, y `terraform plan` en cada PR con `apply` aprobado para prod. |
+| **Terraform validado, no desplegado.** | El certificado y la región son valores de ejemplo. | Desplegar dev desde CI y promover a prod la misma imagen. |
+| **La auditoría crece sin límite.** | Coste de almacenamiento a largo plazo. | Exportar a S3 (DynamoDB export o Streams + Firehose) y aplicar TTL en la tabla. |
+| **Una sola región.** | Una caída regional detiene las ventas. | Multi-región activo-pasivo. Activo-activo con global tables no sirve para el inventario: dos regiones podrían vender la misma entrada. |
