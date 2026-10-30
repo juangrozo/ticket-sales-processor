@@ -14,7 +14,7 @@ Backend reactivo y orientado a eventos para la venta de entradas a eventos (conc
 
 - Java 25 (records, `sealed`, pattern matching con guards y patrones sin nombre)
 - Spring Boot 4.1 + Spring WebFlux (API funcional Router/Handler)
-- DynamoDB (AWS SDK v2, `DynamoDbEnhancedAsyncClient`)
+- DynamoDB (AWS SDK v2, `DynamoDbAsyncClient`)
 - SQS (AWS SDK v2, `SqsAsyncClient`) con DLQ
 - Clean Architecture generada con [scaffold-clean-architecture](https://github.com/bancolombia/scaffold-clean-architecture) de Bancolombia 5.0.5
 - Docker y Docker Compose
@@ -456,6 +456,34 @@ Se usan varias tablas (`ticketing-events`, `-orders`, `-tickets`, `-audit` e `-i
 - Las entidades son `record` inmutables; cada transición devuelve una instancia nueva.
 - `OrderTransition` es una `sealed interface` y `Order.apply` la resuelve con un `switch` con guards (`when`) y sin `default`: añadir una transición nueva rompe la compilación hasta que se maneja.
 - `DomainException` también es `sealed`, para mapear cada error de negocio a su respuesta HTTP con un `switch` exhaustivo.
+
+### SOLID y patrones de diseño
+
+| Principio | Dónde se aplica |
+|---|---|
+| **S**: responsabilidad única | Un caso de uso por acción del negocio; los handlers HTTP solo traducen la petición y la respuesta; un mapper por entidad de DynamoDB; `TransactionSupport` solo decide qué fallos de transacción se reintentan. |
+| **O**: abierto/cerrado | Una transición de orden nueva es un `record` nuevo en `OrderTransition`, y el compilador señala cada `switch` que debe manejarla. Una cola nueva es otra subclase de `OrderMessageProcessor`. |
+| **L**: sustitución de Liskov | `InMemoryTicketingStore` sustituye a los repositorios de DynamoDB en los tests de concurrencia sin cambiar ningún caso de uso. |
+| **I**: segregación de interfaces | Siete puertos pequeños (`EventRepository`, `OrderRepository`, `TicketRepository`, `IdempotencyRepository`, `StateChangeRepository`, `OrderEventPublisher`, `PaymentGateway`); cada caso de uso recibe solo los que usa. |
+| **D**: inversión de dependencias | El dominio define los puertos y la infraestructura los implementa. ArchUnit y `validateStructure` hacen fallar el build si una capa interna depende de una externa. El `Clock` también se inyecta. |
+
+| Patrón | Dónde | Para qué |
+|---|---|---|
+| Adapter | `Dynamo*Repository`, `SQSSender`, `SimulatedPaymentGateway` | Adaptan el AWS SDK y la pasarela de pago a los puertos del dominio. |
+| Strategy | `PaymentGateway`, `OrderEventPublisher` | Implementaciones intercambiables: pasarela simulada o real; SQS en ejecución o `RecordingPublisher` en los tests. |
+| Template Method | `OrderMessageProcessor` | Fija los pasos de cada mensaje (leer, validar, delegar); cada cola implementa solo `handle`. |
+| Chain of Responsibility | `RateLimitFilter` en la `WebFilterChain` | Deja pasar la petición al siguiente filtro o la corta con `429`. |
+| Command (variante) | `OrderTransition` | Cada transición es un objeto con sus datos (`Reject(at, reason)`); `Order.apply` la interpreta. |
+| State | `TicketStatus`, `Order.apply` | Máquinas de estado con enum, `sealed` y `switch` exhaustivo en lugar de una clase por estado: encaja con entidades inmutables y deja todas las transiciones en un solo lugar. |
+| Visitor (sustituido) | `switch` sobre tipos `sealed` (`Order.apply`, `ErrorResponseMapper`) | El pattern matching da lo mismo que Visitor sin doble despacho: un tipo nuevo rompe la compilación donde falta manejarlo. |
+| Static factory method | `Order.place`, `Order.complimentary`, `Ticket.reserved`, `StateChange.reservation` | Nombran cada forma válida de crear una entidad y fijan sus valores iniciales. |
+| Unit of Work | `StateChange` + `StateChangeRepository` | Orden, tickets, contadores y auditoría se guardan juntos en un único `TransactWriteItems`. |
+| Optimistic locking | `version` en la orden; condición de estado en los tickets | Dos procesos no pueden aplicar la misma transición. |
+| Idempotent Consumer / Idempotency Key | Consumidores SQS; cabecera `Idempotency-Key` | Un mensaje o una petición repetidos no tienen efecto. |
+| Retry con backoff, Dead Letter Queue | `TransactionSupport`, `SQSListener`, colas DLQ | Reintentar lo transitorio y apartar lo que no se puede procesar. |
+| Token Bucket | `TokenBucket`, `RateLimiter` | Limita la tasa de peticiones por cliente. |
+
+Observer (Reactor), Builder (AWS SDK) y Singleton (beans de Spring) se usan a través de los frameworks, no se implementan a mano.
 
 ### Sin virtual threads
 WebFlux ya es no bloqueante: unos pocos hilos atienden miles de peticiones concurrentes. Los virtual threads resuelven el problema del código bloqueante, que aquí no existe. BlockHound, activo en los tests, falla si algún flujo bloquea, y encontró casos reales. Hay tres excepciones declaradas y justificadas, ninguna espera I/O:
