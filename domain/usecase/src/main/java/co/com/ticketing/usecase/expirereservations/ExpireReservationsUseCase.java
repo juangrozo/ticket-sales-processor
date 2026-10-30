@@ -74,6 +74,8 @@ public class ExpireReservationsUseCase {
                 .collectList()
                 .flatMap(tickets -> stateChangeRepository.apply(StateChange.transition(order, expired, tickets,
                         TicketStatus.RESERVED, TicketStatus.AVAILABLE)))
+                .doOnSuccess(_ -> LOG.log(System.Logger.Level.INFO,
+                        "Order {0} expired: AWAITING_CONFIRMATION -> EXPIRED, tickets back to AVAILABLE", order.orderId()))
                 .thenReturn(expired)
                 // Confirmed in the meantime, or swept by another worker: nothing to do
                 .onErrorResume(DomainException.class, error -> {
@@ -85,6 +87,8 @@ public class ExpireReservationsUseCase {
     private Mono<Long> requeue(OrderStatus status, Instant now, Function<String, Mono<Void>> publish) {
         return orderRepository.findByStatusChangedBetween(status, now.minus(GIVE_UP_AFTER), now.minus(STALE_AFTER), BATCH_SIZE)
                 .flatMap(order -> publish.apply(order.orderId())
+                        .doOnSuccess(_ -> LOG.log(System.Logger.Level.INFO, "Order {0} re-queued: stuck in {1}",
+                                order.orderId(), status))
                         .thenReturn(order)
                         .onErrorResume(error -> {
                             LOG.log(System.Logger.Level.WARNING, "Order {0} could not be re-queued: {1}",

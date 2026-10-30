@@ -19,6 +19,8 @@ import java.util.stream.IntStream;
 @RequiredArgsConstructor
 public class AssignComplimentaryUseCase {
 
+    private static final System.Logger LOG = System.getLogger(AssignComplimentaryUseCase.class.getName());
+
     private final EventRepository eventRepository;
     private final StateChangeRepository stateChangeRepository;
     private final Clock clock;
@@ -32,7 +34,11 @@ public class AssignComplimentaryUseCase {
                     List<Ticket> tickets = IntStream.range(0, quantity)
                             .mapToObj(_ -> Ticket.complimentary(UUID.randomUUID().toString(), grant.orderId(), eventId, now))
                             .toList();
-                    return stateChangeRepository.apply(StateChange.complimentary(grant, tickets)).thenReturn(grant);
+                    return stateChangeRepository.apply(StateChange.complimentary(grant, tickets))
+                            .doOnSuccess(_ -> LOG.log(System.Logger.Level.INFO,
+                                    "Order {0} granted: {1} COMPLIMENTARY tickets for event {2}",
+                                    grant.orderId(), String.valueOf(quantity), eventId))
+                            .thenReturn(grant);
                 });
     }
 }

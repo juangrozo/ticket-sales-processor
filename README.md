@@ -302,6 +302,16 @@ curl http://localhost:8080/actuator/health
 | `elasticmq` | 9324 | Emulador de SQS con las colas y DLQ ya configuradas |
 | `elasticmq` | 9325 | Panel de estadísticas de las colas |
 
+Para seguir el rastro de cada petición: `docker compose logs -f api worker`. La API registra una línea por petición HTTP (método, ruta, status y duración, sin cabeceras) y cada caso de uso registra su transición con el `orderId`:
+
+```text
+api     AccessLog                : POST /orders 202 80ms
+api     PlaceOrderUseCase        : Order 8b2d6a9f-... placed: PENDING, 2 tickets for event 59387150-...
+worker  ReserveTicketsUseCase    : Order 8b2d6a9f-... reserved: PENDING -> AWAITING_CONFIRMATION, 2 tickets RESERVED until ...
+api     ConfirmOrderUseCase      : Order 8b2d6a9f-... confirmation requested: AWAITING_CONFIRMATION -> CONFIRMING, tickets PENDING_CONFIRMATION
+worker  ProcessPaymentUseCase    : Order 8b2d6a9f-... paid: CONFIRMING -> CONFIRMED, tickets SOLD
+```
+
 Para detenerlo: `docker compose down`.
 
 ### Ejecutar los tests
@@ -587,7 +597,7 @@ Lo que esta solución no resuelve todavía, y qué cambiaría en un entorno prod
 | **Rate limiting por instancia.** | Con N tareas, un cliente puede hacer N veces el límite. | Límite distribuido (ElastiCache) o planes de uso de API Gateway; el WAF ya limita por IP de forma global. |
 | **Pago simulado.** | No hay webhooks, reembolsos ni pagos que tardan. | Pasarela real con `orderId` como clave de idempotencia, confirmación por webhook y una saga con compensación si el pago llega después de expirar la reserva. |
 | **Se venden cantidades, no asientos.** | No hay selección de asiento. | Un ítem por asiento con escritura condicional por asiento; el contador quedaría como vista agregada. |
-| **Observabilidad básica.** | Hay logs y alarmas, pero no trazas ni métricas de negocio. | OpenTelemetry o X-Ray con el `orderId` propagado como atributo de mensaje SQS, logs JSON y métricas de reservas, rechazos y expiraciones. |
+| **Observabilidad básica.** | Hay un log por petición y por transición, y alarmas, pero no trazas ni métricas de negocio. | OpenTelemetry o X-Ray con el `orderId` propagado como atributo de mensaje SQS, logs JSON y métricas de reservas, rechazos y expiraciones. |
 | **Sin pipeline de CI/CD.** | Build, tests y validaciones se ejecutan a mano. | GitHub Actions: build y tests, `tflint` y checkov, imagen ARM64 a ECR con el SHA como tag, y `terraform plan` en cada PR con `apply` aprobado para prod. |
 | **Terraform validado, no desplegado.** | El certificado y la región son valores de ejemplo. | Desplegar dev desde CI y promover a prod la misma imagen. |
 | **La auditoría crece sin límite.** | Coste de almacenamiento a largo plazo. | Exportar a S3 (DynamoDB export o Streams + Firehose) y aplicar TTL en la tabla. |

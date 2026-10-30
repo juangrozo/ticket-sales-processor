@@ -29,6 +29,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ProcessPaymentUseCase {
 
+    private static final System.Logger LOG = System.getLogger(ProcessPaymentUseCase.class.getName());
     static final String PAYMENT_DECLINED = "Payment declined: ";
 
     private final OrderRepository orderRepository;
@@ -39,12 +40,35 @@ public class ProcessPaymentUseCase {
 
     public Mono<Void> process(String orderId) {
         return orderRepository.findById(orderId)
-                .filter(order -> order.status() == OrderStatus.CONFIRMING)
+                .filter(this::isConfirming)
                 .flatMap(order -> ticketRepository.findByOrderId(orderId)
                         .collectList()
                         .flatMap(tickets -> paymentGateway.charge(order)
-                                .flatMap(result -> stateChangeRepository.apply(settle(order, tickets, result)))))
-                .onErrorResume(ConcurrentUpdateException.class, _ -> Mono.empty());
+                                .flatMap(result -> stateChangeRepository.apply(settle(order, tickets, result))
+                                        .doOnSuccess(_ -> logSettlement(order, result)))))
+                .onErrorResume(ConcurrentUpdateException.class, _ -> {
+                    LOG.log(System.Logger.Level.INFO, "Order {0} changed concurrently, duplicate message ignored", orderId);
+                    return Mono.empty();
+                });
+    }
+
+    private boolean isConfirming(Order order) {
+        if (order.status() == OrderStatus.CONFIRMING) {
+            return true;
+        }
+        LOG.log(System.Logger.Level.INFO, "Order {0} already {1}, duplicate order-confirmation message ignored",
+                order.orderId(), order.status());
+        return false;
+    }
+
+    private static void logSettlement(Order order, PaymentResult result) {
+        switch (result) {
+            case Approved _ -> LOG.log(System.Logger.Level.INFO,
+                    "Order {0} paid: CONFIRMING -> CONFIRMED, tickets SOLD", order.orderId());
+            case Declined declined -> LOG.log(System.Logger.Level.INFO,
+                    "Order {0} payment declined ({1}): CONFIRMING -> REJECTED, tickets back to AVAILABLE",
+                    order.orderId(), declined.reason());
+        }
     }
 
     private StateChange settle(Order order, List<Ticket> tickets, PaymentResult result) {

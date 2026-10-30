@@ -38,8 +38,17 @@ public class ReserveTicketsUseCase {
         return orderRepository.findById(orderId)
                 .switchIfEmpty(Mono.fromRunnable(() ->
                         LOG.log(System.Logger.Level.WARNING, "Order {0} not found, message ignored", orderId)))
-                .filter(order -> order.status() == OrderStatus.PENDING)
+                .filter(ReserveTicketsUseCase::isPending)
                 .flatMap(this::reserveOrReject);
+    }
+
+    private static boolean isPending(Order order) {
+        if (order.status() == OrderStatus.PENDING) {
+            return true;
+        }
+        LOG.log(System.Logger.Level.INFO, "Order {0} already {1}, duplicate order-placed message ignored",
+                order.orderId(), order.status());
+        return false;
     }
 
     private Mono<Void> reserveOrReject(Order order) {
@@ -50,9 +59,17 @@ public class ReserveTicketsUseCase {
                 .toList();
 
         return stateChangeRepository.apply(StateChange.reservation(order, reserved, tickets))
+                .doOnSuccess(_ -> LOG.log(System.Logger.Level.INFO,
+                        "Order {0} reserved: PENDING -> AWAITING_CONFIRMATION, {1} tickets RESERVED until {2}",
+                        order.orderId(), String.valueOf(order.quantity()), reserved.expiresAt()))
                 .onErrorResume(InsufficientInventoryException.class, _ -> stateChangeRepository.apply(
-                        StateChange.orderOnly(order, order.apply(new Reject(now, INSUFFICIENT_INVENTORY)))))
+                        StateChange.orderOnly(order, order.apply(new Reject(now, INSUFFICIENT_INVENTORY))))
+                        .doOnSuccess(_ -> LOG.log(System.Logger.Level.INFO,
+                                "Order {0} rejected: PENDING -> REJECTED, insufficient inventory", order.orderId())))
                 // A duplicate message already moved the order: nothing left to do
-                .onErrorResume(ConcurrentUpdateException.class, _ -> Mono.empty());
+                .onErrorResume(ConcurrentUpdateException.class, _ -> {
+                    LOG.log(System.Logger.Level.INFO, "Order {0} changed concurrently, duplicate message ignored", order.orderId());
+                    return Mono.empty();
+                });
     }
 }

@@ -12,11 +12,15 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class CreateEventUseCase {
 
+    private static final System.Logger LOG = System.getLogger(CreateEventUseCase.class.getName());
+
     private final EventRepository eventRepository;
     private final Clock clock;
 
     public Mono<Event> create(String name, String venue, Instant startsAt, int capacity) {
         return Mono.fromCallable(() -> Event.create(UUID.randomUUID().toString(), name, venue, startsAt, capacity, clock.instant()))
-                .flatMap(eventRepository::save);
+                .flatMap(eventRepository::save)
+                .doOnNext(event -> LOG.log(System.Logger.Level.INFO, "Event {0} created with {1} tickets",
+                        event.eventId(), String.valueOf(event.capacity())));
     }
 }

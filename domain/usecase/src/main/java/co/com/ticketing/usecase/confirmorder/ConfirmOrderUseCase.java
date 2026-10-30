@@ -36,7 +36,11 @@ public class ConfirmOrderUseCase {
                 .switchIfEmpty(Mono.error(() -> new ResourceNotFoundException("Order", orderId)))
                 .flatMap(order -> switch (order.status()) {
                     // A repeated confirmation returns the current state instead of failing
-                    case CONFIRMING, CONFIRMED -> Mono.just(order);
+                    case CONFIRMING, CONFIRMED -> {
+                        LOG.log(System.Logger.Level.INFO, "Order {0} already {1}, repeated confirmation ignored",
+                                order.orderId(), order.status());
+                        yield Mono.just(order);
+                    }
                     default -> confirm(order);
                 });
     }
@@ -47,6 +51,9 @@ public class ConfirmOrderUseCase {
                         .collectList()
                         .flatMap(tickets -> stateChangeRepository.apply(StateChange.transition(order, confirming, tickets,
                                 TicketStatus.RESERVED, TicketStatus.PENDING_CONFIRMATION)))
+                        .doOnSuccess(_ -> LOG.log(System.Logger.Level.INFO,
+                                "Order {0} confirmation requested: AWAITING_CONFIRMATION -> CONFIRMING, tickets PENDING_CONFIRMATION",
+                                order.orderId()))
                         .then(orderEventPublisher.publishConfirmationRequested(order.orderId())
                                 // Stored as CONFIRMING already; the reconciliation job re-queues it
                                 .onErrorResume(error -> {

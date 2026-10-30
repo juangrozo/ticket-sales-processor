@@ -49,6 +49,8 @@ public class PlaceOrderUseCase {
                 .map(_ -> Order.place(UUID.randomUUID().toString(), eventId, customerId, quantity, clock.instant()))
                 .flatMap(order -> orderRepository.create(order,
                         IdempotencyRecord.of(scopedKey, requestHash, order.orderId(), order.createdAt())))
+                .doOnNext(order -> LOG.log(System.Logger.Level.INFO, "Order {0} placed: PENDING, {1} tickets for event {2}",
+                        order.orderId(), String.valueOf(order.quantity()), order.eventId()))
                 .flatMap(order -> orderEventPublisher.publishOrderPlaced(order.orderId())
                         // The order is already stored as PENDING; the reconciliation job re-queues it
                         .onErrorResume(error -> {
@@ -63,6 +65,8 @@ public class PlaceOrderUseCase {
         if (!existing.matches(requestHash)) {
             return Mono.error(new IdempotencyConflictException());
         }
-        return orderRepository.findById(existing.orderId());
+        return orderRepository.findById(existing.orderId())
+                .doOnNext(order -> LOG.log(System.Logger.Level.INFO,
+                        "Order {0} returned again: repeated Idempotency-Key, nothing created", order.orderId()));
     }
 }
